@@ -52,8 +52,9 @@ def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_fa
     return None
 
 def get_edinet_headers():
+    # EDINET API V2 の指定ヘッダー名 "Subscription-Key" に修正
     return {
-        "Ocp-Apim-Subscription-Key": API_KEY,
+        "Subscription-Key": API_KEY,
         "User-Agent": "NetNetScreener/1.0"
     }
 
@@ -86,7 +87,6 @@ def get_submitted_documents(date_str):
             logger.error(f"[{date_str}] EDINET APIエラー: {metadata}")
             return []
 
-        # 件数が0件より多い日のみサンプル出力（ログの埋もれ防止）
         if len(results) > 0:
             logger.info(f"[{date_str}] API status={status}, results={len(results)}件")
             for doc in results[:3]:
@@ -293,16 +293,15 @@ def main():
     df_new = df_old.copy()
     raw_targets = []
 
-    # 明示的にJST (日本時間) で取得
     today = datetime.now(JST)
     scan_days = 365 if args.full else 5
-    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] (基准日: {today.strftime('%Y-%m-%d')}) 書類一覧を検索中...")
+    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] (基準日: {today.strftime('%Y-%m-%d')}) 書類一覧を検索中...")
 
     for i in range(scan_days):
         target_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         docs = get_submitted_documents(target_date)
         raw_targets.extend(docs)
-        time.sleep(0.02)
+        time.sleep(0.1)  # 502/429エラー防止のため 0.02s -> 0.1s に調整
 
     unique_targets = select_best_documents(raw_targets)
     logger.info(f"処理対象企業数 (最適書類抽出後): {len(unique_targets)} 件")
@@ -337,7 +336,7 @@ def main():
             logger.error(f"[{sec_code}] 処理エラー: {e}")
             fail_count += 1
 
-        time.sleep(0.05)
+        time.sleep(0.1)  # レート制限対策
 
     logger.info(f"解析完了 - 成功: {success_count}件 / 失敗: {fail_count}件")
 
