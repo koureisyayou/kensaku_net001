@@ -61,9 +61,12 @@ def get_edinet_headers():
 def get_submitted_documents(date_str):
     """EDINET APIから指定日付の提出書類一覧を取得（詳細デバッグログ付き）"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
+    
+    # params に Subscription-Key を含める
     params = {
         "date": date_str,
-        "type": 2
+        "type": 2,
+        "Subscription-Key": API_KEY
     }
     headers = get_edinet_headers()
 
