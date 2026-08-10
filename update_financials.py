@@ -55,7 +55,7 @@ def get_edinet_headers():
     }
 
 def get_submitted_documents(date_str):
-    """EDINET APIから指定日付の提出書類一覧を取得"""
+    """指定日の提出書類一覧を取得"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
     params = {"date": date_str, "type": 2}
     headers = get_edinet_headers()
@@ -72,9 +72,9 @@ def get_submitted_documents(date_str):
         docs = []
         results = data.get("results", [])
         for doc in results:
-            doc_type = doc.get("docTypeCode")
+            doc_type = str(doc.get("docTypeCode", ""))
             sec_code = doc.get("secCode")
-            # 120: 有報, 130: 訂正有報, 140: 四半期, 150: 訂正四半期, 160: 半期, 170: 訂正半期
+            # 120:有報, 130:訂正有報, 140:四半期, 150:訂正四半期, 160:半期, 170:訂正半期
             if doc_type in ["120", "130", "140", "150", "160", "170"] and sec_code:
                 code_4 = sec_code[:4]
                 docs.append({
@@ -93,9 +93,10 @@ def get_submitted_documents(date_str):
 
 def select_best_documents(raw_targets):
     """
-    同銘柄で複数書類がある場合の選択ロジック:
-    1. 決算期末日 (period_end) が最も新しいものを優先 (対象財務期間の最新性)
-    2. 決算期末日が同じ場合は、提出日時 (submit_datetime) が最も新しいものを優先 (訂正報告書の採用)
+    同銘柄で複数書類がある場合の3段階選択ロジック:
+    1. 決算期末日 (period_end) が最新
+    2. 訂正報告書 (doc_type 130/150/170) を優先
+    3. 提出日時 (submit_datetime) が最新
     """
     grouped = {}
     for doc in raw_targets:
@@ -104,11 +105,17 @@ def select_best_documents(raw_targets):
             grouped[code] = []
         grouped[code].append(doc)
 
+    amendment_types = {"130", "150", "170"}
     selected = []
+
     for code, docs in grouped.items():
         docs_sorted = sorted(
             docs,
-            key=lambda x: (x["period_end"], x["submit_datetime"]),
+            key=lambda x: (
+                x["period_end"],
+                1 if x["doc_type"] in amendment_types else 0,
+                x["submit_datetime"]
+            ),
             reverse=True
         )
         selected.append(docs_sorted[0])
@@ -116,10 +123,7 @@ def select_best_documents(raw_targets):
     return selected
 
 def parse_clean_amount(element):
-    """
-    二重換算リスクを極力排除した数値抽出ロジック。
-    XBRL内のテキスト数値を純粋に取得し、scale属性が存在する場合のみ単純乗算する。
-    """
+    """数値とscale属性による乗算処理"""
     if not element or not element.text:
         return None
     
@@ -129,8 +133,6 @@ def parse_clean_amount(element):
     except ValueError:
         return None
 
-    # scale属性の適用（scale="6" => 1,000,000倍, scale="3" => 1,000倍）
-    # ※二重推測ロジック（decimals等を使った推測）は完全に排除
     scale = element.get("scale")
     if scale is not None:
         try:
@@ -141,9 +143,7 @@ def parse_clean_amount(element):
     return int(val)
 
 def extract_valid_contexts(soup):
-    """
-    XBRL内の <xbrli:context> を構文解析し、期末時点 (instant) のコンテキストIDを抽出
-    """
+    """ContextのID抽出"""
     instant_contexts = set()
     consolidated_contexts = set()
     
@@ -152,22 +152,17 @@ def extract_valid_contexts(soup):
         if not ctx_id:
             continue
             
-        # 期末時点(instant)のコンテキストかを構造的に確認
         if ctx.find(["instant", "xbrli:instant"]):
             instant_contexts.add(ctx_id)
             
-        # 連結・個別の文脈判定
-        # (ScenarioやSegment内に Member タグがある場合やID構造から判定)
         ctx_str = str(ctx).lower()
         if "consolidated" in ctx_str and "nonconsolidated" not in ctx_str:
             consolidated_contexts.add(ctx_id)
             
     return instant_contexts, consolidated_contexts
 
-def fetch_xbrl_data(doc_id):
-    """
-    XBRLファイルを解析し、財務情報を抽出
-    """
+def fetch_xbrl_data(doc_id, sec_code):
+    """XBRLから財務数値を抽出し、デバッグ用詳細ログを記録"""
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
     params = {"type": 1}
     headers = get_edinet_headers()
@@ -184,10 +179,9 @@ def fetch_xbrl_data(doc_id):
 
             with z.open(xbrl_filename) as f:
                 soup = BeautifulSoup(f.read(), "lxml-xml")
-
                 instant_ctxs, cons_ctxs = extract_valid_contexts(soup)
 
-                def get_tag_value(tag_names):
+                def get_tag_value(tag_names, item_label="項目"):
                     for tag in tag_names:
                         elements = soup.find_all(lambda e: e.name and e.name.endswith(tag) and not e.name.endswith("Abstract"))
                         
@@ -197,7 +191,8 @@ def fetch_xbrl_data(doc_id):
                             if ctx in instant_ctxs and (ctx in cons_ctxs or "Consolidated" in ctx):
                                 val = parse_clean_amount(el)
                                 if val is not None:
-                                    return val, True, tag
+                                    logger.debug(f"[{sec_code}] {item_label} 取得成功(連結): tag={tag}, ctx={ctx}, val={val:,}")
+                                    return val, True, tag, ctx
 
                         # 2. 個別 + 期末時点 (instant)
                         for el in elements:
@@ -205,23 +200,24 @@ def fetch_xbrl_data(doc_id):
                             if ctx in instant_ctxs:
                                 val = parse_clean_amount(el)
                                 if val is not None:
-                                    return val, False, tag
+                                    logger.debug(f"[{sec_code}] {item_label} 取得成功(個別): tag={tag}, ctx={ctx}, val={val:,}")
+                                    return val, False, tag, ctx
 
-                    return None, False, None
+                    return None, False, None, None
 
-                # 財務項目の取得
-                ca_val, cons, _ = get_tag_value(["CurrentAssets", "AssetsCurrent"])
-                tl_val, _, _    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"])
-                ta_val, _, _    = get_tag_value(["Assets", "AssetsTotal"])
+                # 財務基本項目の取得
+                ca_val, cons, ca_tag, ca_ctx = get_tag_value(["CurrentAssets", "AssetsCurrent"], "流動資産")
+                tl_val, _, tl_tag, _         = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"], "総負債")
+                ta_val, _, ta_tag, _         = get_tag_value(["Assets", "AssetsTotal"], "総資産")
                 
-                # 純資産 / 自己資本（優先順位と持分タイプの明確化）
-                eq_val, _, eq_tag = get_tag_value([
-                    "EquityAttributableToOwnersOfParent",  # 親会社所有者帰属持分
-                    "NetAssets",                            # 純資産合計
-                    "Equity"                                # 資本合計
-                ])
+                # 純資産/親会社帰属持分
+                eq_val, _, eq_tag, _         = get_tag_value([
+                    "EquityAttributableToOwnersOfParent",
+                    "NetAssets",
+                    "Equity"
+                ], "純資産/持分")
 
-                # 会計基準の簡易判定
+                # 会計基準判定
                 is_ifrs = any("AssetsCurrent" in e.name for e in soup.find_all() if e.name)
                 accounting_std = "IFRS" if is_ifrs else "J-GAAP"
 
@@ -242,9 +238,11 @@ def fetch_xbrl_data(doc_id):
                         "consolidated": cons,
                         "accounting_standard": accounting_std
                     }
+                else:
+                    logger.warning(f"[{sec_code}] 必須項目の欠損: CA={ca_val}, TL={tl_val}, TA={ta_val}, EQ={eq_val}")
                     
     except Exception as e:
-        logger.error(f"[{doc_id}] XBRL解析例外: {e}")
+        logger.error(f"[{sec_code}] XBRL解析例外 (doc_id={doc_id}): {e}")
 
     return None
 
@@ -286,7 +284,6 @@ def main():
         raw_targets.extend(docs)
         time.sleep(0.05)
 
-    # 「決算期末日(period_end)の最新性」＋「提出日時(submit_datetime)の最新性」で厳密選択
     unique_targets = select_best_documents(raw_targets)
     logger.info(f"処理対象企業数 (最適書類抽出後): {len(unique_targets)} 件")
 
@@ -296,7 +293,7 @@ def main():
     for doc in unique_targets:
         sec_code = doc["sec_code"]
         try:
-            fin = fetch_xbrl_data(doc["doc_id"])
+            fin = fetch_xbrl_data(doc["doc_id"], sec_code)
             if fin:
                 df_new.loc[sec_code] = {
                     "filer_name": doc["filer_name"],
@@ -311,7 +308,7 @@ def main():
                     "doc_type": doc["doc_type"],
                     "accounting_standard": fin["accounting_standard"],
                     "consolidated": "連結" if fin["consolidated"] else "個別",
-                    "fiscal_period": doc["fiscal_period"] if "fiscal_period" in doc else doc["period_end"]
+                    "fiscal_period": doc["period_end"]
                 }
                 success_count += 1
             else:
@@ -320,14 +317,14 @@ def main():
             logger.error(f"[{sec_code}] 処理エラー: {e}")
             fail_count += 1
 
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     logger.info(f"解析完了 - 成功: {success_count}件 / 失敗: {fail_count}件")
 
     df_new = df_new.reset_index()
     if not df_old.reset_index().equals(df_new):
         df_new.to_csv(CACHE_FILE, index=False)
-        logger.info(f"🎉 財務キャッシュ ({CACHE_FILE}) を完全改修データ構造で更新しました。")
+        logger.info(f"🎉 財務キャッシュ ({CACHE_FILE}) を更新しました。")
     else:
         logger.info("☕ 財務データに変更はありませんでした。")
 
