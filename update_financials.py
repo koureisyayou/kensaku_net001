@@ -32,12 +32,15 @@ def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_fa
             res = requests.get(url, params=params, headers=headers, timeout=20)
             if res.status_code == 200:
                 return res
+            if res.status_code in [401, 403]:
+                logger.error(f"認証エラーが発生しました (status_code={res.status_code})。APIキーを確認してください。")
+                return res
             if res.status_code in [429, 500, 502, 503, 504]:
                 wait_time = backoff_factor ** attempt
                 logger.warning(f"HTTP {res.status_code} 受信。 {wait_time}秒後にリトライ... ({attempt+1}/{max_retries})")
                 time.sleep(wait_time)
             else:
-                logger.error(f"HTTPエラーが発生しました: status_code={res.status_code}")
+                logger.error(f"HTTPエラーが発生しました: status_code={res.status_code}, body={res.text[:200]}")
                 return res
         except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
             wait_time = backoff_factor ** attempt
@@ -64,11 +67,15 @@ def get_submitted_documents(date_str):
 
     try:
         data = res.json()
-        if data.get("metadata", {}).get("status") != "200":
+        status = data.get("metadata", {}).get("status")
+        if status != "200":
+            message = data.get("metadata", {}).get("message", "不明なエラー")
+            logger.warning(f"EDINET API応答ステータス非正常 ({date_str}): status={status}, message={message}")
             return []
         
         docs_dict = {}
-        for doc in data.get("results", []):
+        results = data.get("results", [])
+        for doc in results:
             if doc.get("docTypeCode") in ["120", "140"] and doc.get("secCode"):
                 sec_code = doc.get("secCode")[:4]
                 docs_dict[sec_code] = {
@@ -144,6 +151,11 @@ def main():
     args = parser.parse_args()
 
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
+    if not API_KEY:
+        logger.error("❌ エラー: EDINET_API_KEY が環境変数に設定されていません！")
+        sys.exit(1)
+    else:
+        logger.info(f"🔑 APIキー検出完了: {API_KEY[:4]}*** (文字数: {len(API_KEY)})")
 
     if os.path.exists(CACHE_FILE):
         try:
