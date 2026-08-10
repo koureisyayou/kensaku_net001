@@ -139,17 +139,24 @@ def main():
         try:
             current_assets = float(row.get("current_assets", 0))
             total_liabilities = float(row.get("total_liabilities", 0))
-            equity_ratio = float(row.get("equity_ratio", 0))
+            raw_equity_ratio = float(row.get("equity_ratio", 0))
             submit_date = str(row.get("submit_date", "-"))
         except (ValueError, TypeError):
             continue
+
+        # 【追加】自己資本比率を小数(0.0 ~ 1.0)に正規化
+        # キャッシュ内に 16.477 (%表記) と 0.16477 (割合表記) が混在している対策
+        if raw_equity_ratio > 1.0:
+            norm_equity_ratio = raw_equity_ratio / 100.0  # 例: 16.477 -> 0.16477
+        else:
+            norm_equity_ratio = raw_equity_ratio          # 例: 0.609 -> 0.609
 
         # 正味流動資産 (NCAV) 計算
         ncav = current_assets - total_liabilities
 
         # --- 事前フィルター②: 財務データによる超高速足切り ---
-        # NCAVが0以下、または自己資本比率が30%未満なら、Yahoo FinanceへアクセスせずにSKIP
-        if ncav <= 0 or equity_ratio < 0.3:
+        # NCAVが0以下、または自己資本比率が30% (0.3) 未満ならSKIP
+        if ncav <= 0 or norm_equity_ratio < 0.3:
             continue
 
         # --- 事前フィルター通過銘柄のみ 株価データ取得 ---
@@ -176,7 +183,7 @@ def main():
                     "market_cap": int(market_cap),
                     "ncav": int(ncav),
                     "nc_ratio": nc_ratio,
-                    "equity_ratio": round(equity_ratio * 100, 1),
+                    "equity_ratio": round(norm_equity_ratio * 100, 1), # 正規化した値を100倍して表示
                     "submit_date": submit_date
                 })
 
