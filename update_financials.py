@@ -109,8 +109,9 @@ def get_submitted_documents(date_str):
                     "filer_name": doc.get("filerName"),
                     "doc_type": doc_type,
                     "submit_date": date_str,
-                    "submit_datetime": doc.get("submitDateTime", f"{date_str} 00:00"),
-                    "period_end": doc.get("periodEnd", "")
+                    # or を使って None が入った場合もフォールバックさせる
+                    "submit_datetime": doc.get("submitDateTime") or f"{date_str} 00:00",
+                    "period_end": doc.get("periodEnd") or ""
                 })
 
         if len(docs) > 0:
@@ -138,9 +139,9 @@ def select_best_documents(raw_targets):
         docs_sorted = sorted(
             docs,
             key=lambda x: (
-                x["period_end"],
-                1 if x["doc_type"] in amendment_types else 0,
-                x["submit_datetime"]
+                x.get("period_end") or "",
+                1 if x.get("doc_type") in amendment_types else 0,
+                x.get("submit_datetime") or ""
             ),
             reverse=True
         )
