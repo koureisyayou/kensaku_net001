@@ -54,7 +54,6 @@ def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_fa
     return None
 
 def get_edinet_headers():
-    # キーは params (クエリパラメータ) 側で送るため、ヘッダーは標準識別情報のみ
     return {
         "User-Agent": "NetNetScreener/1.0"
     }
@@ -63,7 +62,6 @@ def get_submitted_documents(date_str):
     """EDINET APIから指定日付の提出書類一覧を取得"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
     
-    # EDINET API V2 では Subscription-Key を params で送信するのが標準
     params = {
         "date": date_str,
         "type": 2,
@@ -109,7 +107,6 @@ def get_submitted_documents(date_str):
                     "filer_name": doc.get("filerName"),
                     "doc_type": doc_type,
                     "submit_date": date_str,
-                    # or を使って None が入った場合もフォールバックさせる
                     "submit_datetime": doc.get("submitDateTime") or f"{date_str} 00:00",
                     "period_end": doc.get("periodEnd") or ""
                 })
@@ -309,15 +306,30 @@ def main():
         time.sleep(0.1)
 
     unique_targets = select_best_documents(raw_targets)
-    logger.info(f"処理対象企業数 (最適書類抽出後): {len(unique_targets)} 件")
+    total_targets = len(unique_targets)
+    logger.info(f"処理対象企業数 (最適書類抽出後): {total_targets} 件")
 
     success_count = 0
     fail_count = 0
+    skip_count = 0
 
-    for doc in unique_targets:
+    for idx, doc in enumerate(unique_targets, 1):
         sec_code = doc["sec_code"]
+        doc_id = doc["doc_id"]
+
+        # 100件ごと、または最後に進捗を出力
+        if idx % 100 == 0 or idx == total_targets:
+            logger.info(f"⏳ 進捗: [{idx}/{total_targets}] (成功: {success_count}, スキップ: {skip_count}, 失敗: {fail_count})")
+
+        # 既に同じ doc_id のデータがキャッシュにある場合はダウンロード・解析をスキップ
+        if sec_code in df_new.index:
+            cached_doc_id = str(df_new.loc[sec_code, "doc_id"]) if "doc_id" in df_new.columns else ""
+            if cached_doc_id == doc_id:
+                skip_count += 1
+                continue
+
         try:
-            fin = fetch_xbrl_data(doc["doc_id"], sec_code)
+            fin = fetch_xbrl_data(doc_id, sec_code)
             if fin:
                 df_new.loc[sec_code] = {
                     "filer_name": doc["filer_name"],
@@ -327,7 +339,7 @@ def main():
                     "equity_value": fin["equity_value"],
                     "equity_type": fin["equity_type"],
                     "equity_ratio": fin["equity_ratio"],
-                    "doc_id": doc["doc_id"],
+                    "doc_id": doc_id,
                     "submit_date": doc["submit_date"],
                     "doc_type": doc["doc_type"],
                     "accounting_standard": fin["accounting_standard"],
@@ -343,7 +355,7 @@ def main():
 
         time.sleep(0.1)
 
-    logger.info(f"解析完了 - 成功: {success_count}件 / 失敗: {fail_count}件")
+    logger.info(f"解析完了 - 成功: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
 
     df_new = df_new.reset_index()
     if not df_old.reset_index().equals(df_new):
