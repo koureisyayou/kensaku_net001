@@ -193,7 +193,12 @@ def extract_valid_contexts(soup):
 
 def fetch_xbrl_data(doc_id, sec_code):
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
-    params = {"type": 1}
+    
+    # params に Subscription-Key を含める
+    params = {
+        "type": 1,
+        "Subscription-Key": API_KEY
+    }
     headers = get_edinet_headers()
 
     try:
@@ -274,9 +279,13 @@ def main():
     args = parser.parse_args()
 
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
+    
+    # APIキーの検出確認ログを追加
     if not API_KEY:
         logger.error("❌ ERROR: EDINET_API_KEY が設定されていません。")
         sys.exit(1)
+    else:
+        logger.info(f"🔑 EDINET_API_KEY 検出成功 (文字数: {len(API_KEY)})")
 
     columns = [
         "sec_code", "filer_name", "current_assets", "total_liabilities", 
