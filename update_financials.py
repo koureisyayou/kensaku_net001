@@ -15,7 +15,9 @@ JST = timezone(timedelta(hours=9))
 
 CACHE_FILE = "financial_cache.csv"
 LOG_FILE = "screener.log"
-API_KEY = os.environ.get("EDINET_API_KEY")
+
+# APIキーの取得（.strip() を追加して前後の改行や空白を自動削除）
+API_KEY = os.environ.get("EDINET_API_KEY", "").strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +36,7 @@ def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_fa
             if res.status_code == 200:
                 return res
             if res.status_code in [401, 403]:
-                logger.error(f"認証エラー (status_code={res.status_code})。APIキーを確認してください。")
+                logger.error(f"認証エラー (status_code={res.status_code}, body={res.text[:200]})。APIキーが無効または未設定です。")
                 return res
             if res.status_code in [429, 500, 502, 503, 504]:
                 wait_time = backoff_factor ** attempt
@@ -52,17 +54,16 @@ def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_fa
     return None
 
 def get_edinet_headers():
-    # EDINET API V2 の指定ヘッダー名 "Subscription-Key" に修正
+    # キーは params (クエリパラメータ) 側で送るため、ヘッダーは標準識別情報のみ
     return {
-        "Subscription-Key": API_KEY,
         "User-Agent": "NetNetScreener/1.0"
     }
 
 def get_submitted_documents(date_str):
-    """EDINET APIから指定日付の提出書類一覧を取得（詳細デバッグログ付き）"""
+    """EDINET APIから指定日付の提出書類一覧を取得"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
     
-    # params に Subscription-Key を含める
+    # EDINET API V2 では Subscription-Key を params で送信するのが標準
     params = {
         "date": date_str,
         "type": 2,
@@ -92,13 +93,6 @@ def get_submitted_documents(date_str):
 
         if len(results) > 0:
             logger.info(f"[{date_str}] API status={status}, results={len(results)}件")
-            for doc in results[:3]:
-                logger.info(
-                    f"[{date_str}] サンプル: docID={doc.get('docID')}, "
-                    f"docTypeCode={doc.get('docTypeCode')}, "
-                    f"secCode={doc.get('secCode')}, "
-                    f"filerName={doc.get('filerName')}"
-                )
 
         docs = []
         target_doc_types = {"120", "130", "140", "150", "160", "170"}
@@ -194,7 +188,6 @@ def extract_valid_contexts(soup):
 def fetch_xbrl_data(doc_id, sec_code):
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
     
-    # params に Subscription-Key を含める
     params = {
         "type": 1,
         "Subscription-Key": API_KEY
@@ -280,9 +273,8 @@ def main():
 
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
     
-    # APIキーの検出確認ログを追加
     if not API_KEY:
-        logger.error("❌ ERROR: EDINET_API_KEY が設定されていません。")
+        logger.error("❌ ERROR: EDINET_API_KEY が設定されていません (環境変数が空です)。")
         sys.exit(1)
     else:
         logger.info(f"🔑 EDINET_API_KEY 検出成功 (文字数: {len(API_KEY)})")
@@ -313,7 +305,7 @@ def main():
         target_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         docs = get_submitted_documents(target_date)
         raw_targets.extend(docs)
-        time.sleep(0.1)  # 502/429エラー防止のため 0.02s -> 0.1s に調整
+        time.sleep(0.1)
 
     unique_targets = select_best_documents(raw_targets)
     logger.info(f"処理対象企業数 (最適書類抽出後): {len(unique_targets)} 件")
@@ -348,7 +340,7 @@ def main():
             logger.error(f"[{sec_code}] 処理エラー: {e}")
             fail_count += 1
 
-        time.sleep(0.1)  # レート制限対策
+        time.sleep(0.1)
 
     logger.info(f"解析完了 - 成功: {success_count}件 / 失敗: {fail_count}件")
 
