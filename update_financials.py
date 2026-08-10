@@ -7,8 +7,11 @@ import argparse
 import zipfile
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
+
+# JST (日本標準時) の定義
+JST = timezone(timedelta(hours=9))
 
 CACHE_FILE = "financial_cache.csv"
 LOG_FILE = "screener.log"
@@ -55,28 +58,54 @@ def get_edinet_headers():
     }
 
 def get_submitted_documents(date_str):
-    """指定日の提出書類一覧を取得"""
+    """EDINET APIから指定日付の提出書類一覧を取得（詳細デバッグログ付き）"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
-    params = {"date": date_str, "type": 2}
+    params = {
+        "date": date_str,
+        "type": 2
+    }
     headers = get_edinet_headers()
-    
+
     res = request_with_retry(url, params=params, headers=headers)
-    if not res or res.status_code != 200:
+
+    if not res:
+        logger.error(f"[{date_str}] APIレスポンスなし")
+        return []
+
+    if res.status_code != 200:
+        logger.error(f"[{date_str}] HTTPエラー: status={res.status_code}, body={res.text[:500]}")
         return []
 
     try:
         data = res.json()
-        if data.get("metadata", {}).get("status") != "200":
-            return []
-        
-        docs = []
+        metadata = data.get("metadata", {})
+        status = metadata.get("status")
         results = data.get("results", [])
+
+        if status != "200":
+            logger.error(f"[{date_str}] EDINET APIエラー: {metadata}")
+            return []
+
+        # 件数が0件より多い日のみサンプル出力（ログの埋もれ防止）
+        if len(results) > 0:
+            logger.info(f"[{date_str}] API status={status}, results={len(results)}件")
+            for doc in results[:3]:
+                logger.info(
+                    f"[{date_str}] サンプル: docID={doc.get('docID')}, "
+                    f"docTypeCode={doc.get('docTypeCode')}, "
+                    f"secCode={doc.get('secCode')}, "
+                    f"filerName={doc.get('filerName')}"
+                )
+
+        docs = []
+        target_doc_types = {"120", "130", "140", "150", "160", "170"}
+
         for doc in results:
-            doc_type = str(doc.get("docTypeCode", ""))
+            doc_type = str(doc.get("docTypeCode") or "").strip()
             sec_code = doc.get("secCode")
-            # 120:有報, 130:訂正有報, 140:四半期, 150:訂正四半期, 160:半期, 170:訂正半期
-            if doc_type in ["120", "130", "140", "150", "160", "170"] and sec_code:
-                code_4 = sec_code[:4]
+
+            if doc_type in target_doc_types and sec_code:
+                code_4 = str(sec_code)[:4]
                 docs.append({
                     "doc_id": doc.get("docID"),
                     "sec_code": code_4,
@@ -86,18 +115,18 @@ def get_submitted_documents(date_str):
                     "submit_datetime": doc.get("submitDateTime", f"{date_str} 00:00"),
                     "period_end": doc.get("periodEnd", "")
                 })
+
+        if len(docs) > 0:
+            logger.info(f"[{date_str}] 対象財務書類={len(docs)}件")
+
         return docs
+
     except Exception as e:
-        logger.error(f"書類一覧パース失敗 ({date_str}): {e}")
+        logger.error(f"[{date_str}] 書類一覧パース失敗: {e}")
         return []
 
 def select_best_documents(raw_targets):
-    """
-    同銘柄で複数書類がある場合の3段階選択ロジック:
-    1. 決算期末日 (period_end) が最新
-    2. 訂正報告書 (doc_type 130/150/170) を優先
-    3. 提出日時 (submit_datetime) が最新
-    """
+    """同銘柄の複数書類から最適なものを選択"""
     grouped = {}
     for doc in raw_targets:
         code = doc["sec_code"]
@@ -123,7 +152,6 @@ def select_best_documents(raw_targets):
     return selected
 
 def parse_clean_amount(element):
-    """数値とscale属性による乗算処理"""
     if not element or not element.text:
         return None
     
@@ -143,7 +171,6 @@ def parse_clean_amount(element):
     return int(val)
 
 def extract_valid_contexts(soup):
-    """ContextのID抽出"""
     instant_contexts = set()
     consolidated_contexts = set()
     
@@ -162,7 +189,6 @@ def extract_valid_contexts(soup):
     return instant_contexts, consolidated_contexts
 
 def fetch_xbrl_data(doc_id, sec_code):
-    """XBRLから財務数値を抽出し、デバッグ用詳細ログを記録"""
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
     params = {"type": 1}
     headers = get_edinet_headers()
@@ -185,39 +211,34 @@ def fetch_xbrl_data(doc_id, sec_code):
                     for tag in tag_names:
                         elements = soup.find_all(lambda e: e.name and e.name.endswith(tag) and not e.name.endswith("Abstract"))
                         
-                        # 1. 連結 + 期末時点 (instant)
                         for el in elements:
                             ctx = el.get("contextRef", "")
                             if ctx in instant_ctxs and (ctx in cons_ctxs or "Consolidated" in ctx):
                                 val = parse_clean_amount(el)
                                 if val is not None:
                                     logger.debug(f"[{sec_code}] {item_label} 取得成功(連結): tag={tag}, ctx={ctx}, val={val:,}")
-                                    return val, True, tag, ctx
+                                    return val, True, tag
 
-                        # 2. 個別 + 期末時点 (instant)
                         for el in elements:
                             ctx = el.get("contextRef", "")
                             if ctx in instant_ctxs:
                                 val = parse_clean_amount(el)
                                 if val is not None:
                                     logger.debug(f"[{sec_code}] {item_label} 取得成功(個別): tag={tag}, ctx={ctx}, val={val:,}")
-                                    return val, False, tag, ctx
+                                    return val, False, tag
 
-                    return None, False, None, None
+                    return None, False, None
 
-                # 財務基本項目の取得
-                ca_val, cons, ca_tag, ca_ctx = get_tag_value(["CurrentAssets", "AssetsCurrent"], "流動資産")
-                tl_val, _, tl_tag, _         = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"], "総負債")
-                ta_val, _, ta_tag, _         = get_tag_value(["Assets", "AssetsTotal"], "総資産")
+                ca_val, cons, ca_tag = get_tag_value(["CurrentAssets", "AssetsCurrent"], "流動資産")
+                tl_val, _, tl_tag    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"], "総負債")
+                ta_val, _, ta_tag    = get_tag_value(["Assets", "AssetsTotal"], "総資産")
                 
-                # 純資産/親会社帰属持分
-                eq_val, _, eq_tag, _         = get_tag_value([
+                eq_val, _, eq_tag    = get_tag_value([
                     "EquityAttributableToOwnersOfParent",
                     "NetAssets",
                     "Equity"
                 ], "純資産/持分")
 
-                # 会計基準判定
                 is_ifrs = any("AssetsCurrent" in e.name for e in soup.find_all() if e.name)
                 accounting_std = "IFRS" if is_ifrs else "J-GAAP"
 
@@ -238,8 +259,6 @@ def fetch_xbrl_data(doc_id, sec_code):
                         "consolidated": cons,
                         "accounting_standard": accounting_std
                     }
-                else:
-                    logger.warning(f"[{sec_code}] 必須項目の欠損: CA={ca_val}, TL={tl_val}, TA={ta_val}, EQ={eq_val}")
                     
     except Exception as e:
         logger.error(f"[{sec_code}] XBRL解析例外 (doc_id={doc_id}): {e}")
@@ -274,15 +293,16 @@ def main():
     df_new = df_old.copy()
     raw_targets = []
 
-    today = datetime.now()
+    # 明示的にJST (日本時間) で取得
+    today = datetime.now(JST)
     scan_days = 365 if args.full else 5
-    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] 書類一覧を検索中...")
+    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] (基准日: {today.strftime('%Y-%m-%d')}) 書類一覧を検索中...")
 
     for i in range(scan_days):
         target_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         docs = get_submitted_documents(target_date)
         raw_targets.extend(docs)
-        time.sleep(0.05)
+        time.sleep(0.02)
 
     unique_targets = select_best_documents(raw_targets)
     logger.info(f"処理対象企業数 (最適書類抽出後): {len(unique_targets)} 件")
