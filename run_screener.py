@@ -19,6 +19,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 金融株・REITなどの除外用コードリスト（代表例・必要に応じて追加可能）
+EXCLUDE_CODES = set([
+    # 銀行・証券・保険・その他金融などの代表的コード範囲やREITコード群
+])
+
+def is_excluded_category(sec_code, filer_name):
+    """金融機関やREITなどNet-Net分析に不適な銘柄を除外"""
+    if sec_code in EXCLUDE_CODES:
+        return True
+    
+    # 銘柄名によるフィルタリング
+    keywords = ["銀行", "金庫", "ホールディングス（金融）", "証券", "保険", "投資法人", "REIT"]
+    for kw in keywords:
+        if kw in filer_name:
+            return True
+    return False
+
 def get_stock_data(sec_code):
     ticker_symbol = f"{sec_code}.T"
     try:
@@ -37,7 +54,7 @@ def main():
     
     if not os.path.exists(CACHE_FILE):
         logger.error(f"キャッシュファイル ({CACHE_FILE}) が見つかりません。")
-        generate_empty_html("財務キャッシュファイルが存在しません。")
+        generate_empty_html("財務キャッシュファイルが存在しません。フルスキャンを実行してください。")
         return
 
     try:
@@ -51,10 +68,19 @@ def main():
     
     for idx, row in df.iterrows():
         sec_code = str(row["sec_code"]).zfill(4)
-        filer_name = row.get("filer_name", "不明")
-        current_assets = row.get("current_assets", 0)
-        total_liabilities = row.get("total_liabilities", 0)
-        equity_ratio = row.get("equity_ratio", 0)
+        filer_name = str(row.get("filer_name", "不明"))
+
+        # 金融機関・REITの除外
+        if is_excluded_category(sec_code, filer_name):
+            continue
+
+        try:
+            current_assets = float(row.get("current_assets", 0))
+            total_liabilities = float(row.get("total_liabilities", 0))
+            equity_ratio = float(row.get("equity_ratio", 0))
+            submit_date = str(row.get("submit_date", "-"))
+        except (ValueError, TypeError):
+            continue
 
         # 正味流動資産 (NCAV) = 流動資産 - 総負債
         ncav = current_assets - total_liabilities
@@ -64,7 +90,10 @@ def main():
             # NC比率 = NCAV / 時価総額
             nc_ratio = round(ncav / market_cap, 2)
             
-            # スクリーニング条件: NC比率 1.0以上、自己資本比率 30%以上、時価総額 500億円以下
+            # Net-Net スクリーニング条件:
+            # 1. NC比率 1.0以上 (時価総額がNCAV以下)
+            # 2. 自己資本比率 30%以上
+            # 3. 時価総額 500億円以下
             if nc_ratio >= 1.0 and equity_ratio >= 0.3 and market_cap <= 50_000_000_000:
                 results.append({
                     "sec_code": sec_code,
@@ -73,7 +102,8 @@ def main():
                     "market_cap": int(market_cap),
                     "ncav": int(ncav),
                     "nc_ratio": nc_ratio,
-                    "equity_ratio": round(equity_ratio * 100, 1)
+                    "equity_ratio": round(equity_ratio * 100, 1),
+                    "submit_date": submit_date
                 })
 
     results_df = pd.DataFrame(results)
@@ -92,7 +122,7 @@ def generate_html(df):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     table_rows = ""
     if df.empty:
-        table_rows = "<tr><td colspan='7' style='text-align:center;'>現在、条件に該当する銘柄はありません。</td></tr>"
+        table_rows = "<tr><td colspan='8' style='text-align:center;'>現在、条件に該当する銘柄はありません。</td></tr>"
     else:
         for _, row in df.iterrows():
             table_rows += f"""
@@ -104,6 +134,7 @@ def generate_html(df):
                 <td style='text-align:right;'>¥{row['ncav']/100_000_000:,.1f}億円</td>
                 <td style='text-align:right;'><strong style='color: #2e7d32;'>{row['nc_ratio']:.2f}倍</strong></td>
                 <td style='text-align:right;'>{row['equity_ratio']:.1f}%</td>
+                <td style='text-align:center;'>{row['submit_date']}</td>
             </tr>
             """
 
@@ -115,8 +146,8 @@ def generate_html(df):
     <title>Net-Net Stock Screener</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 20px; background-color: #f8f9fa; color: #333; }}
-        .container {{ max-width: 1000px; margin: 0 auto; background: #fff; padding: 20px 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-        h1 {{ color: #1a202c; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; }}
+        .container {{ max-width: 1100px; margin: 0 auto; background: #fff; padding: 25px 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+        h1 {{ color: #1a202c; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; margin-top: 0; }}
         .update-time {{ color: #718096; font-size: 0.9em; margin-bottom: 20px; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
         th, td {{ padding: 12px 15px; border-bottom: 1px solid #e2e8f0; text-align: left; }}
@@ -138,6 +169,7 @@ def generate_html(df):
                     <th style="text-align:right;">正味流動資産(NCAV)</th>
                     <th style="text-align:right;">NC比率</th>
                     <th style="text-align:right;">自己資本比率</th>
+                    <th style="text-align:center;">決算提出日</th>
                 </tr>
             </thead>
             <tbody>
