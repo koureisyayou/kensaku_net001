@@ -14,9 +14,10 @@ from bs4 import BeautifulSoup
 JST = timezone(timedelta(hours=9))
 
 CACHE_FILE = "financial_cache.csv"
+PROCESSED_FILE = "processed_docs.csv"
 LOG_FILE = "screener.log"
 
-# APIキーの取得（.strip() を追加して前後の改行や空白を自動削除）
+# APIキーの取得（前後の改行や空白を自動削除）
 API_KEY = os.environ.get("EDINET_API_KEY", "").strip()
 
 logging.basicConfig(
@@ -36,14 +37,14 @@ def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_fa
             if res.status_code == 200:
                 return res
             if res.status_code in [401, 403]:
-                logger.error(f"認証エラー (status_code={res.status_code}, body={res.text[:200]})。APIキーが無効または未設定です。")
+                logger.error(f"認証エラー (status_code={res.status_code})。APIキーが無効または未設定です。")
                 return res
             if res.status_code in [429, 500, 502, 503, 504]:
                 wait_time = backoff_factor ** attempt
                 logger.warning(f"HTTP {res.status_code} 受信。 {wait_time}秒後にリトライ... ({attempt+1}/{max_retries})")
                 time.sleep(wait_time)
             else:
-                logger.error(f"HTTPエラー: status_code={res.status_code}, body={res.text[:200]}")
+                logger.error(f"HTTPエラー: status_code={res.status_code}")
                 return res
         except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
             wait_time = backoff_factor ** attempt
@@ -71,12 +72,7 @@ def get_submitted_documents(date_str):
 
     res = request_with_retry(url, params=params, headers=headers)
 
-    if not res:
-        logger.error(f"[{date_str}] APIレスポンスなし")
-        return []
-
-    if res.status_code != 200:
-        logger.error(f"[{date_str}] HTTPエラー: status={res.status_code}, body={res.text[:500]}")
+    if not res or res.status_code != 200:
         return []
 
     try:
@@ -86,11 +82,7 @@ def get_submitted_documents(date_str):
         results = data.get("results", [])
 
         if status != "200":
-            logger.error(f"[{date_str}] EDINET APIエラー: {metadata}")
             return []
-
-        if len(results) > 0:
-            logger.info(f"[{date_str}] API status={status}, results={len(results)}件")
 
         docs = []
         target_doc_types = {"120", "130", "140", "150", "160", "170"}
@@ -102,7 +94,7 @@ def get_submitted_documents(date_str):
             if doc_type in target_doc_types and sec_code:
                 code_4 = str(sec_code)[:4]
                 docs.append({
-                    "doc_id": doc.get("docID"),
+                    "doc_id": str(doc.get("docID")).strip(),
                     "sec_code": code_4,
                     "filer_name": doc.get("filerName"),
                     "doc_type": doc_type,
@@ -110,9 +102,6 @@ def get_submitted_documents(date_str):
                     "submit_datetime": doc.get("submitDateTime") or f"{date_str} 00:00",
                     "period_end": doc.get("periodEnd") or ""
                 })
-
-        if len(docs) > 0:
-            logger.info(f"[{date_str}] 対象財務書類={len(docs)}件")
 
         return docs
 
@@ -215,7 +204,6 @@ def fetch_xbrl_data(doc_id, sec_code):
                             if ctx in instant_ctxs and (ctx in cons_ctxs or "Consolidated" in ctx):
                                 val = parse_clean_amount(el)
                                 if val is not None:
-                                    logger.debug(f"[{sec_code}] {item_label} 取得成功(連結): tag={tag}, ctx={ctx}, val={val:,}")
                                     return val, True, tag
 
                         for el in elements:
@@ -223,7 +211,6 @@ def fetch_xbrl_data(doc_id, sec_code):
                             if ctx in instant_ctxs:
                                 val = parse_clean_amount(el)
                                 if val is not None:
-                                    logger.debug(f"[{sec_code}] {item_label} 取得成功(個別): tag={tag}, ctx={ctx}, val={val:,}")
                                     return val, False, tag
 
                     return None, False, None
@@ -272,11 +259,10 @@ def main():
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
     
     if not API_KEY:
-        logger.error("❌ ERROR: EDINET_API_KEY が設定されていません (環境変数が空です)。")
+        logger.error("❌ ERROR: EDINET_API_KEY が設定されていません。")
         sys.exit(1)
-    else:
-        logger.info(f"🔑 EDINET_API_KEY 検出成功 (文字数: {len(API_KEY)})")
 
+    # 1. キャッシュ＆処理済み管理リストの読み込み
     columns = [
         "sec_code", "filer_name", "current_assets", "total_liabilities", 
         "total_assets", "equity_value", "equity_type", "equity_ratio", 
@@ -286,24 +272,38 @@ def main():
     
     if os.path.exists(CACHE_FILE):
         try:
-            df_old = pd.read_csv(CACHE_FILE, dtype={"sec_code": str}).set_index("sec_code")
+            df_cache = pd.read_csv(CACHE_FILE, dtype={"sec_code": str}).set_index("sec_code")
         except Exception:
-            df_old = pd.DataFrame(columns=columns).set_index("sec_code")
+            df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
     else:
-        df_old = pd.DataFrame(columns=columns).set_index("sec_code")
+        df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
 
-    df_new = df_old.copy()
+    # 過去に処理済みの全 doc_id を Set として読み込み（O(1) 高速検索用）
+    cached_doc_ids = set()
+    if os.path.exists(PROCESSED_FILE):
+        try:
+            df_proc = pd.read_csv(PROCESSED_FILE, dtype={"doc_id": str})
+            cached_doc_ids = set(df_proc["doc_id"].dropna().str.strip())
+        except Exception:
+            pass
+    
+    # 既存のキャッシュ内に記載のある doc_id も併せてセットに保持
+    if "doc_id" in df_cache.columns:
+        cached_doc_ids.update(df_cache["doc_id"].dropna().astype(str).str.strip().tolist())
+
+    df_new = df_cache.copy()
     raw_targets = []
 
     today = datetime.now(JST)
     scan_days = 365 if args.full else 5
-    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] (基準日: {today.strftime('%Y-%m-%d')}) 書類一覧を検索中...")
+    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] 書類一覧を検索中...")
 
+    # 2. APIから書類一覧を取得
     for i in range(scan_days):
         target_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         docs = get_submitted_documents(target_date)
         raw_targets.extend(docs)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     unique_targets = select_best_documents(raw_targets)
     total_targets = len(unique_targets)
@@ -313,20 +313,19 @@ def main():
     fail_count = 0
     skip_count = 0
 
+    # 3. XBRL解析ループ（高速Set検索）
     for idx, doc in enumerate(unique_targets, 1):
         sec_code = doc["sec_code"]
-        doc_id = doc["doc_id"]
+        doc_id = str(doc["doc_id"]).strip()
 
-        # 100件ごと、または最後に進捗を出力
+        # 100件ごとにログ出力
         if idx % 100 == 0 or idx == total_targets:
-            logger.info(f"⏳ 進捗: [{idx}/{total_targets}] (成功: {success_count}, スキップ: {skip_count}, 失敗: {fail_count})")
+            logger.info(f"⏳ 進捗: [{idx}/{total_targets}] (新規成功: {success_count}, 既処理スキップ: {skip_count}, 解析失敗: {fail_count})")
 
-        # 既に同じ doc_id のデータがキャッシュにある場合はダウンロード・解析をスキップ
-        if sec_code in df_new.index:
-            cached_doc_id = str(df_new.loc[sec_code, "doc_id"]) if "doc_id" in df_new.columns else ""
-            if cached_doc_id == doc_id:
-                skip_count += 1
-                continue
+        # 【超高速化】既に処理済みの doc_id なら即スキップ（XBRL取得を行わない）
+        if doc_id in cached_doc_ids:
+            skip_count += 1
+            continue
 
         try:
             fin = fetch_xbrl_data(doc_id, sec_code)
@@ -346,6 +345,7 @@ def main():
                     "consolidated": "連結" if fin["consolidated"] else "個別",
                     "fiscal_period": doc["period_end"]
                 }
+                cached_doc_ids.add(doc_id)
                 success_count += 1
             else:
                 fail_count += 1
@@ -355,14 +355,17 @@ def main():
 
         time.sleep(0.1)
 
-    logger.info(f"解析完了 - 成功: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
+    logger.info(f"解析完了 - 新規取得: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
 
+    # 4. 財務キャッシュと処理済み管理リストの保存
     df_new = df_new.reset_index()
-    if not df_old.reset_index().equals(df_new):
+    if not df_cache.reset_index().equals(df_new):
         df_new.to_csv(CACHE_FILE, index=False)
         logger.info(f"🎉 財務キャッシュ ({CACHE_FILE}) を更新しました。")
-    else:
-        logger.info("☕ 財務データに変更はありませんでした。")
+
+    # 処理済み doc_id 履歴を保存
+    pd.DataFrame({"doc_id": list(cached_doc_ids)}).to_csv(PROCESSED_FILE, index=False)
+    logger.info(f"💾 処理済みリスト ({PROCESSED_FILE}) を更新しました。")
 
 if __name__ == "__main__":
     main()
