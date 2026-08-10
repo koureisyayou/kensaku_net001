@@ -1,0 +1,100 @@
+name: Net-Net Stock Screener Pipeline
+
+on:
+  schedule:
+    # 毎日18:00 JST (09:00 UTC) -> 日次差分更新
+    - cron: '0 9 * * 1-5'
+    # 毎週日曜 00:00 JST (土曜 15:00 UTC) -> フルスキャン再構築
+    - cron: '0 15 * * 6'
+  workflow_dispatch:
+    inputs:
+      full_scan:
+        type: boolean
+        description: 'フルスキャン（過去データの全件再取得）を実行しますか？'
+        default: false
+
+# GitHub Pages デプロイおよび Issue 作成用のパーミッション設定
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  issues: write
+
+jobs:
+  build-and-screen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリのチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 のセットアップ (pipキャッシュ有効)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存ライブラリのインストール
+        run: pip install -r requirements.txt
+
+      - name: 財務キャッシュの更新 (日次 vs フルスキャン判定)
+        env:
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+        run: |
+          # 手動実行で true が選ばれたか、または日曜日のCron（スケジュールの第5フィールドが6）の場合
+          if [ "${{ github.event.inputs.full_scan }}" = "true" ] || [ "$(date +%u)" = "7" ]; then
+            echo "Running FULL SCAN mode..."
+            python update_financials.py --full
+          else
+            echo "Running DAILY DIFFERENTIAL mode..."
+            python update_financials.py
+          fi
+
+      - name: スクリーニング実行 & index.html 生成
+        run: python run_screener.py
+
+      - name: キャッシュ(CSV)に変更があればGitコミット
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chrono: auto-update financial cache [skip ci]"
+          file_pattern: 'financial_cache.csv'
+
+      - name: ログファイルの保存 (Artifact)
+        if: always() # 成功・失敗に関わらず実行ログを保持
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-log
+          path: screener.log
+
+      - name: GitHub Pages 向けビルド成果物の準備
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.' # index.html が存在するディレクトリ
+
+  deploy-pages:
+    needs: build-and-screen
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: GitHub Pages へ正式デプロイ
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # 処理失敗時の通知ジョブ (Issue自動作成で確実に気付けるようにする)
+  notify-on-failure:
+    needs: [build-and-screen, deploy-pages]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 失敗時にGitHub Issueを自動作成して通知
+        uses: dacbd/create-issue-action@v2
+        with:
+          token: ${{ github.token }}
+          title: "🚨 [Screener Failure] スクリーニングパイプラインが失敗しました"
+          body: |
+            ワークフローの実行でエラーが発生しました。ログを確認してください。
+
+            - **実行イベント**: ${{ github.event_name }}
+            - **実行詳細**: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          assignees: ${{ github.actor }}
