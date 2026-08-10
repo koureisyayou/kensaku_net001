@@ -37,16 +37,38 @@ def is_excluded_category(sec_code, filer_name):
     return False
 
 def get_stock_data(sec_code):
+    """Yahoo Finance から株価と時価総額を取得（上場廃止・データ不全銘柄は安全にスキップ）"""
     ticker_symbol = f"{sec_code}.T"
     try:
         ticker = yf.Ticker(ticker_symbol)
+        
+        # 1. 履歴データの存在を確認（上場廃止銘柄は empty になる）
+        hist = ticker.history(period="5d")
+        if hist.empty or "Close" not in hist.columns:
+            logger.warning(f"[{sec_code}] 株価データが存在しません（上場廃止等の可能性）")
+            return None, None
+
+        # 直近の終値を取得
+        price = float(hist["Close"].iloc[-1])
+        if price <= 0:
+            return None, None
+
+        # 2. fast_info から時価総額を取得
         info = ticker.fast_info
         market_cap = info.get("marketCap", None)
-        price = info.get("lastPrice", None)
-        if market_cap and price:
+
+        # 時価総額が取れなかった場合は（株価 × 発行済株式数）で補正計算を試みる
+        if not market_cap:
+            shares = info.get("shares", None)
+            if shares and shares > 0:
+                market_cap = price * shares
+
+        if market_cap and market_cap > 0:
             return float(market_cap), float(price)
+
     except Exception as e:
-        logger.warning(f"[{sec_code}] 株価取得失敗: {e}")
+        logger.warning(f"[{sec_code}] 株価取得スキップ: {e}")
+
     return None, None
 
 def main():
