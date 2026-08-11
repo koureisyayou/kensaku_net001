@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 
-# ログ設定：ファイルと標準出力（GitHub Actionsコンソール）の両方に確実に出力
+# ログ設定：ファイルと標準出力（GitHub Actionsコンソール）の両方に出力
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -18,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger("NetNetScreener")
 
 CACHE_FILE = "stock_cache.csv"
+SHARES_CACHE_DAYS = 30  # 株式数キャッシュの有効期限（日）
 
 def load_stock_cache():
     """株価・株式数・ステータスキャッシュの読み込み"""
@@ -26,18 +27,20 @@ def load_stock_cache():
             df = pd.read_csv(CACHE_FILE, dtype={"sec_code": str})
             cache = {}
             for _, row in df.iterrows():
-                cache[str(row["sec_code"])] = {
-                    "ticker": row.get("ticker", f"{row['sec_code']}.T"),
+                sec_code = str(row["sec_code"])
+                cache[sec_code] = {
+                    "ticker": row.get("ticker", f"{sec_code}.T"),
                     "price": float(row["price"]) if pd.notnull(row.get("price")) else None,
                     "shares": float(row["shares"]) if pd.notnull(row.get("shares")) else None,
                     "market_cap": float(row["market_cap"]) if pd.notnull(row.get("market_cap")) else None,
-                    "status": row.get("status", "UNKNOWN"),
-                    "updated_at": row.get("updated_at", "")
+                    "status": str(row.get("status", "UNKNOWN")),
+                    "updated_at": str(row.get("updated_at", "")),
+                    "shares_updated_at": str(row.get("shares_updated_at", ""))  # 株式数の最終取得日
                 }
-            logger.info(f"株価キャッシュ読み込み完了: {len(cache)}件")
+            logger.info(f"株価・株式数キャッシュ読み込み完了: {len(cache)}件")
             return cache
         except Exception as e:
-            logger.error(f"キャッシュ読み込み失敗: {e}")
+            logger.error(f"キャッシュ読み込み失敗 (新規作成します): {e}")
             return {}
     return {}
 
@@ -52,105 +55,131 @@ def save_stock_cache(cache):
             "shares": data.get("shares"),
             "market_cap": data.get("market_cap"),
             "status": data.get("status"),
-            "updated_at": data.get("updated_at")
+            "updated_at": data.get("updated_at"),
+            "shares_updated_at": data.get("shares_updated_at")
         })
     df = pd.DataFrame(rows)
     df.to_csv(CACHE_FILE, index=False, encoding="utf-8")
-    logger.info(f"株価キャッシュ保存完了: {len(df)}件")
+    logger.info(f"株価・株式数キャッシュ保存完了: {len(df)}件")
 
-def diagnose_and_fetch_stock_data(sec_code, max_retries=2):
+def fetch_shares_count(ticker):
+    """【重い処理】発行済株式数のみを取得（30日毎にのみ実行）"""
+    shares = None
+    try:
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        shares_series = ticker.get_shares_full(start=start_date)
+        if shares_series is not None and not shares_series.empty:
+            shares_series = shares_series.dropna()
+            if not shares_series.empty:
+                shares = float(shares_series.iloc[-1])
+    except Exception:
+        pass
+
+    if shares is None or shares <= 0:
+        try:
+            fast_shares = ticker.fast_info.get("shares")
+            if fast_shares is not None and float(fast_shares) > 0:
+                shares = float(fast_shares)
+        except Exception:
+            pass
+
+    return shares
+
+def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
     """
-    Yahoo Finance から株価・株式数を取得し、結果と診断ステータスを返す。
-    試行ティッカーは `${sec_code}.T` 固定。
+    単一Tickerから最新株価を取得。
+    株式数が未取得または有効期限切れの場合のみ株式数を重いAPIで再取得する。
     """
-    ticker_symbol = f"{sec_code}.T"
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        
+        # 1. 【軽量】最新株価の取得 (5日分)
+        hist = ticker.history(period="5d", auto_adjust=False)
+        if hist.empty or "Close" not in hist.columns:
+            return None, existing_shares, False, "NO_PRICE"
+
+        close_series = hist["Close"].dropna()
+        if close_series.empty:
+            return None, existing_shares, False, "NO_PRICE"
+
+        price = float(close_series.iloc[-1])
+        if price <= 0:
+            return None, existing_shares, False, "NO_PRICE"
+
+        # 2. 株式数の判定（キャッシュがあれば使い回し、無ければ重い取得を行う）
+        shares = existing_shares
+        shares_refreshed = False
+
+        if shares is None or shares <= 0 or is_shares_expired:
+            shares = fetch_shares_count(ticker)
+            shares_refreshed = True
+
+        if shares is None or shares <= 0:
+            return price, None, shares_refreshed, "NO_SHARES"
+
+        return price, shares, shares_refreshed, "SUCCESS"
+
+    except Exception:
+        return None, existing_shares, False, "YF_ERROR"
+
+def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
+    """
+    複数の市場サフィックス (.T, .F, .S, .FUK) を試行し、
+    株価（毎日更新）と株式数（必要時のみ更新）を取得する。
+    """
+    candidate_suffixes = [".T", ".F", ".S", ".FUK"]
+    
     yf_logger = logging.getLogger("yfinance")
     prev_level = yf_logger.level
     yf_logger.setLevel(logging.CRITICAL)
 
+    # キャッシュの株式数と有効期限チェック
+    existing_shares = cached_info.get("shares") if cached_info else None
+    shares_updated_at = cached_info.get("shares_updated_at", "") if cached_info else ""
+    
+    is_shares_expired = True
+    if shares_updated_at:
+        try:
+            last_date = datetime.strptime(shares_updated_at, "%Y-%m-%d")
+            if (datetime.now() - last_date).days < SHARES_CACHE_DAYS:
+                is_shares_expired = False
+        except ValueError:
+            is_shares_expired = True
+
+    last_status = "NOT_FOUND"
+
     try:
-        for attempt in range(1, max_retries + 1):
-            try:
-                ticker = yf.Ticker(ticker_symbol)
+        for suffix in candidate_suffixes:
+            ticker_symbol = f"{sec_code}{suffix}"
+            price, shares, shares_refreshed, status = fetch_single_ticker(
+                ticker_symbol, existing_shares, is_shares_expired
+            )
 
-                # 1. 株価の取得 (5日分)
-                hist = ticker.history(period="5d", auto_adjust=False)
-
-                if hist.empty:
-                    # Ticker情報自体の有無を確認する簡易チェック
-                    try:
-                        fast_info = ticker.fast_info
-                        if not fast_info or len(fast_info) == 0:
-                            logger.warning(f"DIAGNOSIS: {ticker_symbol} -> NOT_FOUND (銘柄未登録・廃止等)")
-                            return None, None, None, "NOT_FOUND", ticker_symbol
-                    except Exception:
-                        pass
-
-                    if attempt < max_retries:
-                        time.sleep(attempt * 1.0)
-                        continue
-                    logger.warning(f"DIAGNOSIS: {ticker_symbol} -> NO_PRICE (history rows=0)")
-                    return None, None, None, "NO_PRICE", ticker_symbol
-
-                if "Close" not in hist.columns:
-                    logger.warning(f"DIAGNOSIS: {ticker_symbol} -> NO_PRICE (Close列なし)")
-                    return None, None, None, "NO_PRICE", ticker_symbol
-
-                close_series = hist["Close"].dropna()
-                if close_series.empty:
-                    logger.warning(f"DIAGNOSIS: {ticker_symbol} -> NO_PRICE (Close値全NaN)")
-                    return None, None, None, "NO_PRICE", ticker_symbol
-
-                price = float(close_series.iloc[-1])
-                if price <= 0:
-                    return None, None, None, "NO_PRICE", ticker_symbol
-
-                # --- 株価取得成功 ---
-                # 2. 発行済株式数の取得
-                shares = None
-                try:
-                    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-                    shares_series = ticker.get_shares_full(start=start_date)
-                    if shares_series is not None and not shares_series.empty:
-                        shares_series = shares_series.dropna()
-                        if not shares_series.empty:
-                            shares = float(shares_series.iloc[-1])
-                except Exception as e:
-                    logger.debug(f"get_shares_full error ({ticker_symbol}): {e}")
-
-                if shares is None or shares <= 0:
-                    try:
-                        fast_shares = ticker.fast_info.get("shares")
-                        if fast_shares is not None and float(fast_shares) > 0:
-                            shares = float(fast_shares)
-                    except Exception:
-                        pass
-
-                if shares is None or shares <= 0:
-                    logger.warning(f"DIAGNOSIS: {ticker_symbol} -> NO_SHARES (株価={price}円, 株式数未取得)")
-                    return price, None, None, "NO_SHARES", ticker_symbol
-
-                # 株価・株式数ともに取得完了
+            if status == "SUCCESS":
                 market_cap = price * shares
-                logger.info(f"SUCCESS: {sec_code} ({ticker_symbol}) - 株価:{price:.1f}円, 時価総額:{market_cap/1e8:.2f}億円")
-                return price, shares, market_cap, "SUCCESS", ticker_symbol
+                shares_date = today_str if shares_refreshed or not shares_updated_at else shares_updated_at
+                
+                logger.info(f"SUCCESS: {sec_code} ({ticker_symbol}) - 株価:{price:.1f}円, "
+                            f"株式数:{'再取得' if shares_refreshed else 'キャッシュ利用'}, "
+                            f"時価総額:{market_cap/1e8:.2f}億円")
+                
+                return price, shares, market_cap, "SUCCESS", ticker_symbol, shares_date
 
-            except Exception as e:
-                if attempt < max_retries:
-                    time.sleep(attempt * 1.0)
-                    continue
-                logger.error(f"DIAGNOSIS: {ticker_symbol} -> YF_ERROR (通信・APIエラー: {e})")
-                return None, None, None, "YF_ERROR", ticker_symbol
+            elif status == "NO_SHARES":
+                last_status = "NO_SHARES"
+            elif status == "NO_PRICE" and last_status != "NO_SHARES":
+                last_status = "NO_PRICE"
+            elif status == "YF_ERROR" and last_status not in ["NO_SHARES", "NO_PRICE"]:
+                last_status = "YF_ERROR"
+
+        logger.warning(f"DIAGNOSIS: {sec_code} -> {last_status} (試行市場全滅)")
+        return None, None, None, last_status, f"{sec_code}.T", shares_updated_at
 
     finally:
         yf_logger.setLevel(prev_level)
 
-
 def run_pipeline(financial_df):
-    """
-    スクリーニングパイプライン実行
-    financial_df: 財務キャッシュデータ (DataFrame)
-    """
+    """スクリーニングパイプライン実行"""
     today_str = datetime.now().strftime("%Y-%m-%d")
     stock_cache = load_stock_cache()
 
@@ -164,38 +193,35 @@ def run_pipeline(financial_df):
 
     logger.info(f"【第1段階】総銘柄数: {len(financial_df)} -> 財務スクリーニング通過: {len(stage1_df)}銘柄")
 
-    # 2. 第2段階：株価・時価総額の取得と診断
-    status_counts = {"SUCCESS": 0, "NOT_FOUND": 0, "NO_PRICE": 0, "NO_SHARES": 0, "YF_ERROR": 0, "CACHED": 0}
+    # 2. 第2段階：株価の毎日更新＆株式数の条件付き更新
+    status_counts = {"SUCCESS": 0, "NOT_FOUND": 0, "NO_PRICE": 0, "NO_SHARES": 0, "YF_ERROR": 0}
     results = []
 
     for _, row in stage1_df.iterrows():
         sec_code = str(row["sec_code"])
+        cached_info = stock_cache.get(sec_code)
 
-        # キャッシュのチェック (SUCCESSのデータのみ採用)
-        if sec_code in stock_cache and stock_cache[sec_code].get("status") == "SUCCESS":
-            cdata = stock_cache[sec_code]
-            price = cdata["price"]
-            shares = cdata["shares"]
-            market_cap = cdata["market_cap"]
-            status = "SUCCESS"
-            ticker_symbol = cdata["ticker"]
-            status_counts["CACHED"] += 1
-        else:
-            price, shares, market_cap, status, ticker_symbol = diagnose_and_fetch_stock_data(sec_code)
-            status_counts[status] += 1
+        # 毎日株価を取得（株式数はキャッシュを優先利用）
+        price, shares, market_cap, status, ticker_symbol, shares_updated_at = diagnose_and_fetch_stock_data(
+            sec_code, cached_info, today_str
+        )
+        status_counts[status] = status_counts.get(status, 0) + 1
 
-            stock_cache[sec_code] = {
-                "ticker": ticker_symbol,
-                "price": price,
-                "shares": shares,
-                "market_cap": market_cap,
-                "status": status,
-                "updated_at": today_str
-            }
+        # キャッシュの更新（株価と本日の日付を常に最新化）
+        stock_cache[sec_code] = {
+            "ticker": ticker_symbol,
+            "price": price,
+            "shares": shares,
+            "market_cap": market_cap,
+            "status": status,
+            "updated_at": today_str,
+            "shares_updated_at": shares_updated_at
+        }
 
+        # ネットネット判定 (NCAV / 時価総額 >= 1.0)
         if status == "SUCCESS" and market_cap and market_cap > 0:
             nc_ratio = row["ncav"] / market_cap
-            if nc_ratio >= 1.0: # NCAV / 時価総額 >= 1.0
+            if nc_ratio >= 1.0:
                 item = row.to_dict()
                 item.update({
                     "ticker": ticker_symbol,
@@ -207,16 +233,17 @@ def run_pipeline(financial_df):
                 })
                 results.append(item)
 
+    # 最新キャッシュの保存
     save_stock_cache(stock_cache)
 
-    logger.info(f"【株価取得診断結果】 SUCCESS(新規): {status_counts['SUCCESS']}, キャッシュ利用: {status_counts['CACHED']}, "
-                f"NOT_FOUND: {status_counts['NOT_FOUND']}, NO_PRICE: {status_counts['NO_PRICE']}, "
-                f"NO_SHARES: {status_counts['NO_SHARES']}, YF_ERROR: {status_counts['YF_ERROR']}")
+    logger.info(f"【株価取得診断結果】 SUCCESS: {status_counts.get('SUCCESS', 0)}, "
+                f"NOT_FOUND: {status_counts.get('NOT_FOUND', 0)}, NO_PRICE: {status_counts.get('NO_PRICE', 0)}, "
+                f"NO_SHARES: {status_counts.get('NO_SHARES', 0)}, YF_ERROR: {status_counts.get('YF_ERROR', 0)}")
 
     candidates_df = pd.DataFrame(results)
     logger.info(f"【第2段階】ネットネット基準クリア (NCAV/時価総額 >= 1.0): {len(candidates_df)}銘柄")
 
-    # 3. 第3段階・第4段階：二次スクリーニング & ランキング
+    # 3. 第3段階：出力
     if not candidates_df.empty:
         candidates_df = candidates_df.sort_values(by="nc_ratio", ascending=False)
 
@@ -234,8 +261,6 @@ def run_pipeline(financial_df):
 
     return pd.DataFrame()
 
-
-# --- GitHub Actions 実行用エントリーポイント ---
 if __name__ == "__main__":
     logger.info("--- スクリーナー実行開始 ---")
     
