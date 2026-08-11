@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import logging
 import pandas as pd
 import yfinance as yf
@@ -36,7 +37,7 @@ def is_excluded_category(sec_code, filer_name):
 def load_stock_cache(today_str):
     """
     当日分の株価キャッシュを読み込む。
-    旧ステータスとの後方互換性も保持。
+    成功(SUCCESS / 旧OK)したデータのみをキャッシュとして復元する。
     """
     if not os.path.exists(STOCK_CACHE_FILE):
         return {}
@@ -49,18 +50,17 @@ def load_stock_cache(today_str):
             sec_code = str(row["sec_code"]).strip()
             status = str(row.get("status", "SUCCESS"))
             
-            # 旧ステータス互換処理
+            # 成功状態のデータのみキャッシュ利用対象とする
             if status in ["OK", "SUCCESS"]:
                 status = "SUCCESS"
-            elif status in ["NO_DATA", "NO_PRICE"]:
-                status = "NO_PRICE"
             else:
-                continue  # NO_SHARES や YF_ERROR などの一時失敗はキャッシュから除外
+                continue  # NO_PRICE, NO_SHARES, YF_ERROR などはキャッシュ非対象
 
             m_cap = float(row["market_cap"]) if pd.notna(row.get("market_cap")) else None
             prc = float(row["price"]) if pd.notna(row.get("price")) else None
             
-            cache[sec_code] = (m_cap, prc, status)
+            if m_cap is not None and prc is not None:
+                cache[sec_code] = (m_cap, prc, status)
         return cache
     except Exception as e:
         logger.warning(f"株価キャッシュ読み込みエラー: {e}")
@@ -68,14 +68,14 @@ def load_stock_cache(today_str):
 
 def save_stock_cache(stock_cache_data, today_str):
     """
-    株価キャッシュをCSVに保存する（SUCCESS および 確実な永続失敗である NO_PRICE のみ）。
+    株価キャッシュをCSVに保存する（SUCCESS のデータのみを厳元保存）。
     """
     try:
         records = []
         for sec_code, item in stock_cache_data.items():
             market_cap, price, status = item
-            # NO_SHARES や YF_ERROR はキャッシュへ書き込まない（次回再試行できるようにする）
-            if status not in ["SUCCESS", "NO_PRICE"]:
+            # 成功時(SUCCESS)のみ永続キャッシュ化
+            if status != "SUCCESS":
                 continue
 
             records.append({
@@ -87,7 +87,7 @@ def save_stock_cache(stock_cache_data, today_str):
             })
         df = pd.DataFrame(records)
         df.to_csv(STOCK_CACHE_FILE, index=False, encoding="utf-8-sig")
-        logger.info(f"株価キャッシュ（当日分）を保存しました ({len(df)} 件)")
+        logger.info(f"株価キャッシュ（当日成功分）を保存しました ({len(df)} 件)")
     except Exception as e:
         logger.error(f"株価キャッシュ保存エラー: {e}")
 
@@ -97,18 +97,17 @@ def normalize_sec_code(sec_code_raw):
         return code_str.zfill(4)
     return code_str.upper()
 
-def get_stock_data_from_yahoo(sec_code):
+def get_stock_data_from_yahoo(sec_code, max_retries=2):
     """
-    1. Ticker.history() で株価取得
-    2. Ticker.get_shares_full() で発行済株式数取得
-    3. 時価総額 = 株価 × 発行済株式数 で計算
+    Yahoo Finance から株価と株式数を取得し、時価総額を算出する。
+    一時エラー（レート制限等）対策として最大 max_retries 回のリトライ処理を行う。
     
     Returns:
         (market_cap, price, status)
-        - SUCCESS: 株価・株式数ともに取得成功し、時価総額算出完了
-        - NO_PRICE: 株価の取得に失敗
-        - NO_SHARES: 株価は取れたが株式数の取得に失敗（※キャッシュ非対象）
-        - YF_ERROR: 予期せぬ例外（※キャッシュ非対象）
+        - SUCCESS: 株価・株式数ともに取得成功
+        - NO_PRICE: 株価の取得に失敗（※キャッシュ非対象）
+        - NO_SHARES: 株価取得成功だが株式数取得失敗（※キャッシュ非対象）
+        - YF_ERROR: 通信エラー等の例外発生（※キャッシュ非対象）
     """
     ticker_symbol = f"{sec_code}.T"
 
@@ -117,67 +116,74 @@ def get_stock_data_from_yahoo(sec_code):
     yf_logger.setLevel(logging.CRITICAL)
 
     try:
-        ticker = yf.Ticker(ticker_symbol)
-
-        # --------------------------------------------------
-        # ① 株価取得 (Price)
-        # --------------------------------------------------
-        hist = ticker.history(period="5d", auto_adjust=False)
-
-        if hist.empty or "Close" not in hist.columns:
-            logger.warning(f"NO_PRICE: {ticker_symbol} - historyが空またはClose列なし")
-            return None, None, "NO_PRICE"
-
-        close_series = hist["Close"].dropna()
-        if close_series.empty:
-            logger.warning(f"NO_PRICE: {ticker_symbol} - 有効なCloseデータなし")
-            return None, None, "NO_PRICE"
-
-        price = float(close_series.iloc[-1])
-        if price <= 0:
-            logger.warning(f"NO_PRICE: {ticker_symbol} - 株価が0以下: {price}")
-            return None, None, "NO_PRICE"
-
-        # --------------------------------------------------
-        # ② 発行済株式数取得 (Shares) & 時価総額計算
-        # --------------------------------------------------
-        shares = None
-        try:
-            # 直近30日分の株式数履歴データを取得（最新値を利用）
-            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-            shares_series = ticker.get_shares_full(start=start_date)
-
-            if shares_series is not None and not shares_series.empty:
-                shares_series = shares_series.dropna()
-                if not shares_series.empty:
-                    shares = float(shares_series.iloc[-1])
-        except Exception as e:
-            logger.debug(f"get_shares_full 取得失敗 ({ticker_symbol}): {e}")
-
-        # 株式数が取れなかった場合のフォールバック（fast_info の shares のみ参照）
-        if shares is None or shares <= 0:
+        for attempt in range(1, max_retries + 1):
             try:
-                fast_shares = ticker.fast_info.get("shares")
-                if fast_shares is not None and float(fast_shares) > 0:
-                    shares = float(fast_shares)
-            except Exception:
-                pass
+                ticker = yf.Ticker(ticker_symbol)
 
-        # 株式数取得失敗判定
-        if shares is None or shares <= 0:
-            logger.warning(f"NO_SHARES: {ticker_symbol} - 株価取得成功({price:.1f}円)だが株式数取得不可")
-            return None, price, "NO_SHARES"
+                # 1. 株価取得 (Price)
+                hist = ticker.history(period="5d", auto_adjust=False)
 
-        # 時価総額を算出
-        market_cap = price * shares
-        return float(market_cap), float(price), "SUCCESS"
+                if hist.empty or "Close" not in hist.columns:
+                    if attempt < max_retries:
+                        time.sleep( attempt * 1.5 )
+                        continue
+                    logger.warning(f"NO_PRICE: {ticker_symbol} - historyが空またはClose列なし")
+                    return None, None, "NO_PRICE"
 
-    except Exception as e:
-        logger.exception(f"YF_ERROR: {ticker_symbol} - 予期せぬ例外が発生しました: {e}")
-        return None, None, "YF_ERROR"
+                close_series = hist["Close"].dropna()
+                if close_series.empty:
+                    if attempt < max_retries:
+                        time.sleep( attempt * 1.5 )
+                        continue
+                    logger.warning(f"NO_PRICE: {ticker_symbol} - 有効なCloseデータなし")
+                    return None, None, "NO_PRICE"
+
+                price = float(close_series.iloc[-1])
+                if price <= 0:
+                    logger.warning(f"NO_PRICE: {ticker_symbol} - 株価が0以下: {price}")
+                    return None, None, "NO_PRICE"
+
+                # 2. 発行済株式数取得 (Shares)
+                shares = None
+                try:
+                    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                    shares_series = ticker.get_shares_full(start=start_date)
+
+                    if shares_series is not None and not shares_series.empty:
+                        shares_series = shares_series.dropna()
+                        if not shares_series.empty:
+                            shares = float(shares_series.iloc[-1])
+                except Exception as e:
+                    logger.debug(f"get_shares_full 取得エラー ({ticker_symbol}): {e}")
+
+                # 予備手段: fast_info の shares を参照
+                if shares is None or shares <= 0:
+                    try:
+                        fast_shares = ticker.fast_info.get("shares")
+                        if fast_shares is not None and float(fast_shares) > 0:
+                            shares = float(fast_shares)
+                    except Exception:
+                        pass
+
+                if shares is None or shares <= 0:
+                    logger.warning(f"NO_SHARES: {ticker_symbol} - 株価成功({price:.1f}円)だが株式数不詳")
+                    return None, price, "NO_SHARES"
+
+                # 時価総額算出成功
+                market_cap = price * shares
+                return float(market_cap), float(price), "SUCCESS"
+
+            except Exception as e:
+                if attempt < max_retries:
+                    time.sleep( attempt * 1.5 )
+                    continue
+                logger.warning(f"YF_ERROR: {ticker_symbol} - 取得例外発生 (attempt={attempt}): {e}")
+                return None, None, "YF_ERROR"
 
     finally:
         yf_logger.setLevel(previous_level)
+
+    return None, None, "YF_ERROR"
 
 def main():
     logger.info("=== スクリーニング処理を開始します ===")
@@ -248,8 +254,8 @@ def main():
             new_fetch_count += 1
             status_counts[status] = status_counts.get(status, 0) + 1
             
-            # 一時障害(NO_SHARES / YF_ERROR) 以外のみ当日分キャッシュへ追加
-            if status in ["SUCCESS", "NO_PRICE"]:
+            # 【重要】SUCCESS の場合のみ当日キャッシュへ登録する
+            if status == "SUCCESS":
                 stock_cache[sec_code] = (market_cap, price, status)
 
         # スクリーニング判定 (NC比率 >= 1.0 かつ 時価総額 <= 500億円)
@@ -267,7 +273,7 @@ def main():
                     "submit_date": submit_date
                 })
 
-    # 新規問い合わせが発生した場合はキャッシュをCSVへ更新保存
+    # 新規成功データがあればキャッシュを更新保存
     if new_fetch_count > 0:
         save_stock_cache(stock_cache, today_str)
 
@@ -284,9 +290,9 @@ def main():
     logger.info(f"株価データ取得内訳      : 既存キャッシュ {cached_count} 件 / 新規取得 {new_fetch_count} 件")
     if new_fetch_count > 0:
         logger.info(f"  ├ SUCCESS       : {status_counts['SUCCESS']} 件")
-        logger.info(f"  ├ NO_PRICE      : {status_counts['NO_PRICE']} 件")
-        logger.info(f"  ├ NO_SHARES     : {status_counts['NO_SHARES']} 件（※再試行対象・未キャッシュ）")
-        logger.info(f"  └ YF_ERROR      : {status_counts['YF_ERROR']} 件（※再試行対象・未キャッシュ）")
+        logger.info(f"  ├ NO_PRICE      : {status_counts['NO_PRICE']} 件（※未キャッシュ・再試行対象）")
+        logger.info(f"  ├ NO_SHARES     : {status_counts['NO_SHARES']} 件（※未キャッシュ・再試行対象）")
+        logger.info(f"  └ YF_ERROR      : {status_counts['YF_ERROR']} 件（※未キャッシュ・再試行対象）")
     logger.info(f"最終検出件数 (NC比率>=1.0 & 時価総額<=500億): {len(results_df)} 件")
     logger.info("==========================================")
 
