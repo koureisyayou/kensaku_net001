@@ -49,15 +49,34 @@ def generate():
 """
 
     for _, r in df.iterrows():
+        # 1. 企業名の取得（filer_name / company_name / 社名 の順にフォールバック）
+        company_name = (
+            r.get('filer_name') or 
+            r.get('company_name') or 
+            r.get('社名') or 
+            ''
+        )
+
         price = f"{r.get('price', 0):,.1f}" if pd.notnull(r.get('price')) else "-"
         mcap = f"{r.get('market_cap', 0)/1e8:,.2f}" if pd.notnull(r.get('market_cap')) else "-"
         ncav = f"{r.get('ncav', 0)/1e8:,.2f}" if pd.notnull(r.get('ncav')) else "-"
         nc_ratio = f"{r.get('nc_ratio', 0):,.2f}" if pd.notnull(r.get('nc_ratio')) else "-"
-        eq_ratio = f"{r.get('equity_ratio', 0):,.1f}%" if pd.notnull(r.get('equity_ratio')) else "-"
+        
+        # 2. 自己資本比率の表示判定（小数か100倍済みかを自動判定）
+        raw_eq = r.get('equity_ratio')
+        if pd.notnull(raw_eq):
+            eq_val = float(raw_eq)
+            # 値が1以下（例: 0.354）なら100倍して35.4%にする
+            if abs(eq_val) <= 1.0:
+                eq_val = eq_val * 100
+            # 100倍して100%を超えるデータ（異常値）の安全装置（必要に応じて調整）
+            eq_ratio = f"{eq_val:,.1f}%"
+        else:
+            eq_ratio = "-"
 
         html_content += f"""            <tr>
                 <td><strong>{r.get('sec_code', '')}</strong></td>
-                <td>{r.get('company_name', '')}</td>
+                <td>{company_name}</td>
                 <td>{r.get('ticker', '')}</td>
                 <td class="num">{price}</td>
                 <td class="num">{mcap}</td>
