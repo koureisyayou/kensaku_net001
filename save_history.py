@@ -19,7 +19,7 @@ def append_to_history():
     # ==============================
     # 2. スクリーニング結果読み込み
     # ==============================
-    df = pd.read_csv(CANDIDATES_FILE)
+    df = pd.read_csv(CANDIDATES_FILE, dtype={"sec_code": str})
 
     if df.empty:
         print("スクリーニング結果が0件のため、履歴保存をスキップします。")
@@ -29,13 +29,13 @@ def append_to_history():
     # 3. 必須列チェック
     # ==============================
     required_columns = [
-        "コード",
-        "銘柄名",
-        "株価 (円)",
-        "時価総額 (億円)",
-        "NCAV (億円)",
-        "NCAV / 時価総額",
-        "自己資本比率",
+        "sec_code",
+        "company_name",
+        "price",
+        "market_cap",
+        "ncav",
+        "nc_ratio",
+        "equity_ratio",
     ]
 
     missing_columns = [
@@ -56,10 +56,10 @@ def append_to_history():
     ).strftime("%Y-%m-%d")
 
     # ==============================
-    # 5. 証券コードを文字列化
+    # 5. 証券コードの整形（文字列・空白除去）
     # ==============================
-    df["コード"] = (
-        df["コード"]
+    df["sec_code"] = (
+        df["sec_code"]
         .astype(str)
         .str.replace(".0", "", regex=False)
         .str.strip()
@@ -71,7 +71,7 @@ def append_to_history():
     df["rank"] = range(1, len(df) + 1)
 
     # ==============================
-    # 7. 任意列
+    # 7. 任意列取得用ヘルパー
     # ==============================
     def get_column(column):
         if column in df.columns:
@@ -79,25 +79,27 @@ def append_to_history():
         return pd.Series([None] * len(df))
 
     # ==============================
-    # 8. 履歴データ作成
+    # 8. 履歴データ作成（データの実義に忠実にマッピング）
     # ==============================
     history_df = pd.DataFrame({
         "date": today,
-        "sec_code": df["コード"],
-        "company_name": df["銘柄名"],
-        "price": df["株価 (円)"],
-        "market_cap": df["時価総額 (億円)"],
-        "ncav": df["NCAV (億円)"],
-        "ncav_ratio": df["NCAV / 時価総額"],
-        "net_cash": get_column("純現金 (億円)"),
-        "net_cash_ratio": get_column("純現金 / 時価総額"),
-        "operating_cf": get_column("営業CF (億円)"),
-        "equity_ratio": df["自己資本比率"],
+        "sec_code": df["sec_code"],
+        "company_name": df["company_name"],
+        "price": df["price"],
+        "market_cap": df["market_cap"],
+        "ncav": df["ncav"],
+        "ncav_ratio": df["nc_ratio"],
+        "cash_and_equivalents": get_column("cash_and_equivalents"),
+        "net_cash": get_column("net_cash"),
+        "net_cash_ratio": get_column("net_cash_ratio"),
+        "operating_income": get_column("operating_income"),
+        "operating_cf": get_column("operating_cf"),
+        "equity_ratio": df["equity_ratio"],
         "rank": df["rank"],
     })
 
     # ==============================
-    # 9. 既存履歴
+    # 9. 既存履歴の読み込みと結合
     # ==============================
     if os.path.exists(HISTORY_FILE):
 
@@ -109,10 +111,8 @@ def append_to_history():
         # 日付を文字列として統一
         history["date"] = history["date"].astype(str)
 
-        # 同日のデータを削除
-        history = history[
-            history["date"] != today
-        ]
+        # 同日のデータを削除（上書き・再実行時の重複防止）
+        history = history[history["date"] != today]
 
         # 新しい結果を追加
         history = pd.concat(
@@ -140,17 +140,9 @@ def append_to_history():
         encoding="utf-8-sig"
     )
 
-    print(
-        f"[{today}] 履歴データを更新しました。"
-    )
-
-    print(
-        f"今回: {len(history_df)} 件"
-    )
-
-    print(
-        f"累計: {len(history)} 件"
-    )
+    print(f"[{today}] 履歴データを更新しました。")
+    print(f"今回: {len(history_df)} 件")
+    print(f"累計: {len(history)} 件")
 
 
 if __name__ == "__main__":
