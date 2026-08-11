@@ -337,7 +337,9 @@ def main():
 
     if os.path.exists(CACHE_FILE):
         try:
-            df_cache = pd.read_csv(CACHE_FILE, dtype=DTYPE_SPEC).set_index("sec_code")
+            df_cache = pd.read_csv(CACHE_FILE, dtype=DTYPE_SPEC)
+            # 既存データに銘柄コードの重複があれば最新のみ残す
+            df_cache = df_cache.drop_duplicates(subset=["sec_code"], keep="last").set_index("sec_code")
 
             for col in DTYPE_SPEC.keys():
                 if col != "sec_code" and col in df_cache.columns:
