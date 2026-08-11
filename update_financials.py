@@ -270,10 +270,44 @@ def main():
         "consolidated", "fiscal_period"
     ]
     
+    # 1. 明示的に文字列として扱う列の型辞書定義
+    DTYPE_SPEC = {
+        "sec_code": "string",
+        "filer_name": "string",
+        "equity_type": "string",
+        "doc_id": "string",
+        "submit_date": "string",
+        "doc_type": "string",
+        "accounting_standard": "string",
+        "consolidated": "string",
+        "fiscal_period": "string",
+    }
+
+    # 2. 数値として扱う列のリスト
+    NUMERIC_COLS = [
+        "current_assets",
+        "total_liabilities",
+        "total_assets",
+        "equity_value",
+        "equity_ratio",
+    ]
+
     if os.path.exists(CACHE_FILE):
         try:
-            df_cache = pd.read_csv(CACHE_FILE, dtype={"sec_code": str}).set_index("sec_code")
-        except Exception:
+            df_cache = pd.read_csv(CACHE_FILE, dtype=DTYPE_SPEC).set_index("sec_code")
+
+            # 念のため文字列型の列を判定・強制変換（Pandasのバージョン互換対策）
+            for col in DTYPE_SPEC.keys():
+                if col != "sec_code" and col in df_cache.columns:
+                    df_cache[col] = df_cache[col].astype("string")
+
+            # 数値列の強制数値化（文字混入時は NaN にして落とす）
+            for col in NUMERIC_COLS:
+                if col in df_cache.columns:
+                    df_cache[col] = pd.to_numeric(df_cache[col], errors="coerce")
+
+        except Exception as e:
+            logger.warning(f"キャッシュ読み込み失敗: {e}")
             df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
     else:
         df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
