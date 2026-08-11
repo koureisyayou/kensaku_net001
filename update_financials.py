@@ -31,13 +31,11 @@ logger = logging.getLogger(__name__)
 EDINET_API_KEY = os.environ.get("EDINET_API_KEY", "")
 
 def get_edinet_headers():
-    """APIリクエスト用の共通ヘッダー"""
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
 
 def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor=1.0):
-    """リトライ機構付きHTTP GETリクエスト"""
     for i in range(retries):
         try:
             res = requests.get(url, params=params, headers=headers, timeout=15)
@@ -50,7 +48,6 @@ def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor
     return None
 
 def enforce_dtypes(df):
-    """DataFrameの各列の型を明示的に強制固定する"""
     if df.empty:
         return df
 
@@ -72,32 +69,7 @@ def enforce_dtypes(df):
 
     return df
 
-def load_or_create_cache():
-    """財務キャッシュの読み込み"""
-    cols = [
-        "sec_code", "filer_name", "current_assets", "total_liabilities", 
-        "total_assets", "equity_value", "equity_type", "equity_ratio", 
-        "doc_id", "submit_date", "doc_type", "accounting_standard", 
-        "consolidated", "fiscal_period"
-    ]
-    
-    if not os.path.exists(CACHE_FILE):
-        df = pd.DataFrame(columns=cols)
-        return enforce_dtypes(df)
-
-    try:
-        df = pd.read_csv(CACHE_FILE, dtype=str)
-        for c in cols:
-            if c not in df.columns:
-                df[c] = ""
-        return enforce_dtypes(df)
-    except Exception as e:
-        logger.error(f"キャッシュ読み込みエラー: {e}")
-        df = pd.DataFrame(columns=cols)
-        return enforce_dtypes(df)
-
 def get_submitted_documents(date_str):
-    """EDINET APIから指定日付の提出書類一覧を取得"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
     
     params = {
@@ -147,7 +119,6 @@ def get_submitted_documents(date_str):
         return []
 
 def select_best_documents(raw_targets):
-    """同銘柄の複数書類から最適なものを選択"""
     grouped = {}
     for doc in raw_targets:
         code = doc["sec_code"]
@@ -163,7 +134,7 @@ def select_best_documents(raw_targets):
             docs,
             key=lambda x: (
                 x.get("period_end") or "",
-                0 if x.get("doc_type") in amendment_types else 1,  # 通常報告書(1)を訂正書(0)より優先
+                0 if x.get("doc_type") in amendment_types else 1,
                 x.get("submit_datetime") or ""
             ),
             reverse=True
@@ -173,7 +144,6 @@ def select_best_documents(raw_targets):
     return selected
 
 def parse_clean_amount(element):
-    """XBRL要素から数値データを抽出・単位換算"""
     if not element or not element.text:
         return None
 
@@ -199,7 +169,6 @@ def parse_clean_amount(element):
     return int(val)
 
 def extract_valid_contexts(soup):
-    """コンテキストから時点（instant）および連結（consolidated）フラグを取得"""
     instant_contexts = set()
     consolidated_contexts = set()
     
@@ -218,7 +187,6 @@ def extract_valid_contexts(soup):
     return instant_contexts, consolidated_contexts
 
 def fetch_xbrl_data(doc_id, sec_code):
-    """指定doc_idのXBRLを取得して財務諸表データを解析"""
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
     
     params = {
@@ -238,10 +206,11 @@ def fetch_xbrl_data(doc_id, sec_code):
                 return None
 
             with z.open(xbrl_filename) as f:
+                # lxml-xmlの代わりに標準パーサーまたは分解処理を徹底
                 soup = BeautifulSoup(f.read(), "lxml-xml")
                 instant_ctxs, cons_ctxs = extract_valid_contexts(soup)
 
-                def get_tag_value(tag_names, item_label="項目"):
+                def get_tag_value(tag_names):
                     for tag in tag_names:
                         elements = soup.find_all(lambda e: e.name and e.name.endswith(tag) and not e.name.endswith("Abstract"))
                         
@@ -261,18 +230,21 @@ def fetch_xbrl_data(doc_id, sec_code):
 
                     return None, False, None
 
-                ca_val, cons, ca_tag = get_tag_value(["CurrentAssets", "AssetsCurrent"], "流動資産")
-                tl_val, _, tl_tag    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"], "総負債")
-                ta_val, _, ta_tag    = get_tag_value(["Assets", "AssetsTotal"], "総資産")
+                ca_val, cons, ca_tag = get_tag_value(["CurrentAssets", "AssetsCurrent"])
+                tl_val, _, tl_tag    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"])
+                ta_val, _, ta_tag    = get_tag_value(["Assets", "AssetsTotal"])
                 
                 eq_val, _, eq_tag    = get_tag_value([
                     "EquityAttributableToOwnersOfParent",
                     "NetAssets",
                     "SharesOfAggregateAmountOfNetAssets"
-                ], "純資産/持分")
+                ])
 
                 is_ifrs = any("AssetsCurrent" in e.name for e in soup.find_all() if e.name)
                 accounting_std = "IFRS" if is_ifrs else "J-GAAP"
+
+                # BeautifulSoup ツリーの明確なメモリ破棄（重要）
+                soup.decompose()
 
                 if (ca_val is not None and 
                     tl_val is not None and 
@@ -328,17 +300,12 @@ def main():
     }
 
     NUMERIC_COLS = [
-        "current_assets",
-        "total_liabilities",
-        "total_assets",
-        "equity_value",
-        "equity_ratio",
+        "current_assets", "total_liabilities", "total_assets", "equity_value", "equity_ratio"
     ]
 
     if os.path.exists(CACHE_FILE):
         try:
             df_cache = pd.read_csv(CACHE_FILE, dtype=DTYPE_SPEC)
-            # 既存データに銘柄コードの重複があれば最新のみ残す
             df_cache = df_cache.drop_duplicates(subset=["sec_code"], keep="last").set_index("sec_code")
 
             for col in DTYPE_SPEC.keys():
@@ -436,5 +403,11 @@ def main():
     pd.DataFrame({"doc_id": list(cached_doc_ids)}).to_csv(PROCESSED_FILE, index=False, encoding="utf-8-sig")
     logger.info(f"💾 処理済みリスト ({PROCESSED_FILE}) を更新しました。")
 
+    # ログ出力バッファを強制排出して明確にプロセスを閉じる
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+
 if __name__ == "__main__":
     main()
+    sys.exit(0)
