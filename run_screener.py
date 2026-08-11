@@ -181,10 +181,30 @@ def run_pipeline(financial_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     stock_cache = load_stock_cache()
 
-    # --- 補正処理：自己資本比率(equity_ratio)の安全再計算 ---
-    # (純資産 net_assets ÷ 総資産 total_assets) * 100
+    # --- 補正処理：自己資本比率(equity_ratio)の安全再計算＆正規化 ---
     if "net_assets" in financial_df.columns and "total_assets" in financial_df.columns:
-        financial_df["equity_ratio"] = (financial_df["net_assets"] / financial_df["total_assets"]) * 100.0
+        # 純資産と総資産が存在する場合、比率を計算
+        # ※ 0除算を防ぐため total_assets > 0 の条件を付与
+        mask = (pd.notnull(financial_df["net_assets"])) & (pd.notnull(financial_df["total_assets"])) & (financial_df["total_assets"] > 0)
+        
+        # 単純計算
+        financial_df.loc[mask, "equity_ratio"] = (financial_df.loc[mask, "net_assets"] / financial_df.loc[mask, "total_assets"]) * 100.0
+
+    # 【安全装置】単位違い（千円と円の混在等）で100%を超えてしまっている場合の補正
+    def normalize_equity_ratio(val):
+        if pd.isnull(val):
+            return 0.0
+        val = float(val)
+        # 100%を超える場合は、100以下になるまで10で割る（桁ズレの自動修正）
+        while val > 100.0:
+            val = val / 10.0
+        # 0.5 などの小数（比率）で入っている場合は 100倍する
+        if 0 < val <= 1.0:
+            val = val * 100.0
+        return val
+
+    if "equity_ratio" in financial_df.columns:
+        financial_df["equity_ratio"] = financial_df["equity_ratio"].apply(normalize_equity_ratio)
 
     # 1. 第1段階：一次財務スクリーニング (NCAV > 0 & 自己資本比率 >= 30%)
     financial_df["ncav"] = financial_df["current_assets"] - financial_df["total_liabilities"]
