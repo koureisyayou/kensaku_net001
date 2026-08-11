@@ -66,8 +66,10 @@ def append_to_history():
     )
 
     # ==============================
-    # 6. ランキング
+    # 6. ソートとランキング明示
+    # (NCAV/時価総額比率の降順でソート後、順位付与)
     # ==============================
+    df = df.sort_values("nc_ratio", ascending=False).reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)
 
     # ==============================
@@ -79,7 +81,7 @@ def append_to_history():
         return pd.Series([None] * len(df))
 
     # ==============================
-    # 8. 履歴データ作成（データの実義に忠実にマッピング）
+    # 8. 履歴データ作成（指標の定義通りのマッピング）
     # ==============================
     history_df = pd.DataFrame({
         "date": today,
@@ -99,7 +101,7 @@ def append_to_history():
     })
 
     # ==============================
-    # 9. 既存履歴の読み込みと結合
+    # 9. 既存履歴の読み込みと結合・同日同銘柄の重複排除
     # ==============================
     if os.path.exists(HISTORY_FILE):
 
@@ -111,20 +113,23 @@ def append_to_history():
         # 日付を文字列として統一
         history["date"] = history["date"].astype(str)
 
-        # 同日のデータを削除（上書き・再実行時の重複防止）
-        history = history[history["date"] != today]
-
-        # 新しい結果を追加
-        history = pd.concat(
+        # 新規データを末尾に結合
+        combined = pd.concat(
             [history, history_df],
             ignore_index=True
+        )
+
+        # [date, sec_code] の組み合わせで重複を排除（後に結合された新規データを残す）
+        history = combined.drop_duplicates(
+            subset=["date", "sec_code"],
+            keep="last"
         )
 
     else:
         history = history_df
 
     # ==============================
-    # 10. 並び替え
+    # 10. 並び替え（日付順・順位順）
     # ==============================
     history = history.sort_values(
         ["date", "rank"],
@@ -141,8 +146,8 @@ def append_to_history():
     )
 
     print(f"[{today}] 履歴データを更新しました。")
-    print(f"今回: {len(history_df)} 件")
-    print(f"累計: {len(history)} 件")
+    print(f"今回追加・更新: {len(history_df)} 件")
+    print(f"累計保持: {len(history)} 件")
 
 
 if __name__ == "__main__":
