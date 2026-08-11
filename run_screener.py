@@ -1,17 +1,18 @@
 import os
+import sys
 import time
 import logging
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 
-# ログ設定
+# ログ設定：ファイルと標準出力（GitHub Actionsコンソール）の両方に確実に出力
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("screener.log", encoding="utf-8"),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger("NetNetScreener")
@@ -84,7 +85,7 @@ def diagnose_and_fetch_stock_data(sec_code, max_retries=2):
                             return None, None, None, "NOT_FOUND", ticker_symbol
                     except Exception:
                         pass
-                    
+
                     if attempt < max_retries:
                         time.sleep(attempt * 1.0)
                         continue
@@ -154,10 +155,8 @@ def run_pipeline(financial_df):
     stock_cache = load_stock_cache()
 
     # 1. 第1段階：一次財務スクリーニング (NCAV > 0 & 自己資本比率 >= 30%)
-    # ncav = 流動資産 - 全負債
     financial_df["ncav"] = financial_df["current_assets"] - financial_df["total_liabilities"]
-    
-    # フィルタリング
+
     stage1_df = financial_df[
         (financial_df["ncav"] > 0) & 
         (financial_df["equity_ratio"] >= 30.0)
@@ -171,7 +170,7 @@ def run_pipeline(financial_df):
 
     for _, row in stage1_df.iterrows():
         sec_code = str(row["sec_code"])
-        
+
         # キャッシュのチェック (SUCCESSのデータのみ採用)
         if sec_code in stock_cache and stock_cache[sec_code].get("status") == "SUCCESS":
             cdata = stock_cache[sec_code]
@@ -182,11 +181,9 @@ def run_pipeline(financial_df):
             ticker_symbol = cdata["ticker"]
             status_counts["CACHED"] += 1
         else:
-            # 未キャッシュまたは過去にエラーだったものは新規取得試行
             price, shares, market_cap, status, ticker_symbol = diagnose_and_fetch_stock_data(sec_code)
             status_counts[status] += 1
-            
-            # キャッシュの更新
+
             stock_cache[sec_code] = {
                 "ticker": ticker_symbol,
                 "price": price,
@@ -198,7 +195,7 @@ def run_pipeline(financial_df):
 
         if status == "SUCCESS" and market_cap and market_cap > 0:
             nc_ratio = row["ncav"] / market_cap
-            if nc_ratio >= 1.0: # NCAV / 時価総額 >= 1.0 (ネットネット株)
+            if nc_ratio >= 1.0: # NCAV / 時価総額 >= 1.0
                 item = row.to_dict()
                 item.update({
                     "ticker": ticker_symbol,
@@ -210,7 +207,6 @@ def run_pipeline(financial_df):
                 })
                 results.append(item)
 
-    # キャッシュのディスク保存
     save_stock_cache(stock_cache)
 
     logger.info(f"【株価取得診断結果】 SUCCESS(新規): {status_counts['SUCCESS']}, キャッシュ利用: {status_counts['CACHED']}, "
@@ -222,10 +218,8 @@ def run_pipeline(financial_df):
 
     # 3. 第3段階・第4段階：二次スクリーニング & ランキング
     if not candidates_df.empty:
-        # NCAV倍率順（割安度順）および自己資本比率・営業利益でスコアリング
         candidates_df = candidates_df.sort_values(by="nc_ratio", ascending=False)
-        
-        # 画面表示・ファイル出力用のカラム整理
+
         output_cols = [
             "sec_code", "company_name", "ticker", "price", "market_cap", 
             "ncav", "nc_ratio", "equity_ratio", "operating_income", 
@@ -233,10 +227,31 @@ def run_pipeline(financial_df):
         ]
         available_cols = [c for c in output_cols if c in candidates_df.columns]
         summary_df = candidates_df[available_cols]
-        
-        # CSV等に保存
+
         summary_df.to_csv("net_net_candidates.csv", index=False, encoding="utf-8-sig")
-        logger.info(f"ネットネット候補銘柄一覧を net_net_candidates.csv に出力しました。")
+        logger.info("ネットネット候補銘柄一覧を net_net_candidates.csv に出力しました。")
         return summary_df
 
     return pd.DataFrame()
+
+
+# --- GitHub Actions 実行用エントリーポイント ---
+if __name__ == "__main__":
+    logger.info("--- スクリーナー実行開始 ---")
+    
+    financial_file = "financial_cache.csv"
+    if not os.path.exists(financial_file):
+        logger.error(f"エラー: {financial_file} が見つかりません。先に財務キャッシュ生成を行ってください。")
+        sys.exit(1)
+
+    try:
+        financial_df = pd.read_csv(financial_file, dtype={"sec_code": str})
+        logger.info(f"{financial_file} 読み込み完了: {len(financial_df)}件")
+        
+        run_pipeline(financial_df)
+        
+    except Exception as e:
+        logger.critical(f"スクリーナー処理中に致命的なエラーが発生しました: {e}", exc_info=True)
+        sys.exit(1)
+
+    logger.info("--- スクリーナー実行完了 ---")
