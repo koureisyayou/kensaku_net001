@@ -1,25 +1,22 @@
 import os
-import io
 import sys
 import time
 import logging
-import argparse
+import io
 import zipfile
+import argparse
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 
-# JST (日本標準時) の定義
-JST = timezone(timedelta(hours=9))
-
+# ファイルパス・定数の定義
 CACHE_FILE = "financial_cache.csv"
 PROCESSED_FILE = "processed_docs.csv"
-LOG_FILE = "screener.log"
+LOG_FILE = "update_financials.log"
+JST = timezone(timedelta(hours=9))
 
-# APIキーの取得（前後の改行や空白を自動削除）
-API_KEY = os.environ.get("EDINET_API_KEY", "").strip()
-
+# ログ設定
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -30,34 +27,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def request_with_retry(url, params=None, headers=None, max_retries=4, backoff_factor=2):
-    for attempt in range(max_retries):
-        try:
-            res = requests.get(url, params=params, headers=headers, timeout=20)
-            if res.status_code == 200:
-                return res
-            if res.status_code in [401, 403]:
-                logger.error(f"認証エラー (status_code={res.status_code})。APIキーが無効または未設定です。")
-                return res
-            if res.status_code in [429, 500, 502, 503, 504]:
-                wait_time = backoff_factor ** attempt
-                logger.warning(f"HTTP {res.status_code} 受信。 {wait_time}秒後にリトライ... ({attempt+1}/{max_retries})")
-                time.sleep(wait_time)
-            else:
-                logger.error(f"HTTPエラー: status_code={res.status_code}")
-                return res
-        except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-            wait_time = backoff_factor ** attempt
-            logger.warning(f"通信例外 ({e})。 {wait_time}秒後にリトライ... ({attempt+1}/{max_retries})")
-            time.sleep(wait_time)
-            
-    logger.error(f"リクエスト失敗: {url}")
-    return None
+# EDINET API 設定
+EDINET_API_KEY = os.environ.get("EDINET_API_KEY", "")
 
 def get_edinet_headers():
+    """APIリクエスト用の共通ヘッダー"""
     return {
-        "User-Agent": "NetNetScreener/1.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
+
+def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor=1.0):
+    """リトライ機構付きHTTP GETリクエスト"""
+    for i in range(retries):
+        try:
+            res = requests.get(url, params=params, headers=headers, timeout=15)
+            if res.status_code == 200:
+                return res
+            logger.warning(f"HTTP {res.status_code}: {url} (Attempt {i+1}/{retries})")
+        except Exception as e:
+            logger.warning(f"通信エラー ({e}): {url} (Attempt {i+1}/{retries})")
+        time.sleep(backoff_factor * (2 ** i))
+    return None
+
+def enforce_dtypes(df):
+    """DataFrameの各列の型を明示的に強制固定する"""
+    if df.empty:
+        return df
+
+    string_cols = [
+        "sec_code", "filer_name", "doc_id", "doc_type", "submit_date",
+        "equity_type", "accounting_standard", "consolidated", "fiscal_period"
+    ]
+    numeric_cols = [
+        "current_assets", "total_liabilities", "total_assets", "equity_value", "equity_ratio"
+    ]
+
+    for col in string_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    return df
+
+def load_or_create_cache():
+    """財務キャッシュの読み込み"""
+    cols = [
+        "sec_code", "filer_name", "current_assets", "total_liabilities", 
+        "total_assets", "equity_value", "equity_type", "equity_ratio", 
+        "doc_id", "submit_date", "doc_type", "accounting_standard", 
+        "consolidated", "fiscal_period"
+    ]
+    
+    if not os.path.exists(CACHE_FILE):
+        df = pd.DataFrame(columns=cols)
+        return enforce_dtypes(df)
+
+    try:
+        df = pd.read_csv(CACHE_FILE, dtype=str)
+        for c in cols:
+            if c not in df.columns:
+                df[c] = ""
+        return enforce_dtypes(df)
+    except Exception as e:
+        logger.error(f"キャッシュ読み込みエラー: {e}")
+        df = pd.DataFrame(columns=cols)
+        return enforce_dtypes(df)
 
 def get_submitted_documents(date_str):
     """EDINET APIから指定日付の提出書類一覧を取得"""
@@ -66,7 +103,7 @@ def get_submitted_documents(date_str):
     params = {
         "date": date_str,
         "type": 2,
-        "Subscription-Key": API_KEY
+        "Subscription-Key": EDINET_API_KEY
     }
     headers = get_edinet_headers()
 
@@ -136,13 +173,12 @@ def select_best_documents(raw_targets):
     return selected
 
 def parse_clean_amount(element):
+    """XBRL要素から数値データを抽出・単位換算"""
     if not element or not element.text:
         return None
 
-    # 【追加】単位（unitRef）に日・株・比率などが含まれる非金額要素を除外
     unit_ref = str(element.get("unitRef") or element.get("unitref") or "").lower()
     if unit_ref:
-        # 除外したい単位キーワード
         invalid_units = ["day", "share", "pure", "person", "month", "year"]
         if any(bad in unit_ref for bad in invalid_units):
             return None
@@ -163,6 +199,7 @@ def parse_clean_amount(element):
     return int(val)
 
 def extract_valid_contexts(soup):
+    """コンテキストから時点（instant）および連結（consolidated）フラグを取得"""
     instant_contexts = set()
     consolidated_contexts = set()
     
@@ -181,11 +218,12 @@ def extract_valid_contexts(soup):
     return instant_contexts, consolidated_contexts
 
 def fetch_xbrl_data(doc_id, sec_code):
+    """指定doc_idのXBRLを取得して財務諸表データを解析"""
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
     
     params = {
         "type": 1,
-        "Subscription-Key": API_KEY
+        "Subscription-Key": EDINET_API_KEY
     }
     headers = get_edinet_headers()
 
@@ -227,11 +265,10 @@ def fetch_xbrl_data(doc_id, sec_code):
                 tl_val, _, tl_tag    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"], "総負債")
                 ta_val, _, ta_tag    = get_tag_value(["Assets", "AssetsTotal"], "総資産")
                 
-                # 広すぎる "Equity" を除外し、明確な純資産タグのみに限定
                 eq_val, _, eq_tag    = get_tag_value([
-                    "EquityAttributableToOwnersOfParent",  # IFRS
-                    "NetAssets",                           # 日本基準
-                    "SharesOfAggregateAmountOfNetAssets"   # 補足用
+                    "EquityAttributableToOwnersOfParent",
+                    "NetAssets",
+                    "SharesOfAggregateAmountOfNetAssets"
                 ], "純資産/持分")
 
                 is_ifrs = any("AssetsCurrent" in e.name for e in soup.find_all() if e.name)
@@ -267,11 +304,10 @@ def main():
 
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
     
-    if not API_KEY:
-        logger.error("❌ ERROR: EDINET_API_KEY が設定されていません。")
+    if not EDINET_API_KEY:
+        logger.error("❌ ERROR: EDINET_API_KEY が設定されていません。環境変数を確認してください。")
         sys.exit(1)
 
-    # 1. キャッシュ＆処理済み管理リストの読み込み
     columns = [
         "sec_code", "filer_name", "current_assets", "total_liabilities", 
         "total_assets", "equity_value", "equity_type", "equity_ratio", 
@@ -279,7 +315,6 @@ def main():
         "consolidated", "fiscal_period"
     ]
     
-    # 1. 明示的に文字列として扱う列の型辞書定義
     DTYPE_SPEC = {
         "sec_code": "string",
         "filer_name": "string",
@@ -292,7 +327,6 @@ def main():
         "fiscal_period": "string",
     }
 
-    # 2. 数値として扱う列のリスト
     NUMERIC_COLS = [
         "current_assets",
         "total_liabilities",
@@ -305,12 +339,10 @@ def main():
         try:
             df_cache = pd.read_csv(CACHE_FILE, dtype=DTYPE_SPEC).set_index("sec_code")
 
-            # 念のため文字列型の列を判定・強制変換（Pandasのバージョン互換対策）
             for col in DTYPE_SPEC.keys():
                 if col != "sec_code" and col in df_cache.columns:
                     df_cache[col] = df_cache[col].astype("string")
 
-            # 数値列の強制数値化（文字混入時は NaN にして落とす）
             for col in NUMERIC_COLS:
                 if col in df_cache.columns:
                     df_cache[col] = pd.to_numeric(df_cache[col], errors="coerce")
@@ -321,7 +353,6 @@ def main():
     else:
         df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
 
-    # 過去に処理済みの全 doc_id を Set として読み込み（O(1) 高速検索用）
     cached_doc_ids = set()
     if os.path.exists(PROCESSED_FILE):
         try:
@@ -330,7 +361,6 @@ def main():
         except Exception:
             pass
     
-    # 既存のキャッシュ内に記載のある doc_id も併せてセットに保持
     if "doc_id" in df_cache.columns:
         cached_doc_ids.update(df_cache["doc_id"].dropna().astype(str).str.strip().tolist())
 
@@ -341,7 +371,6 @@ def main():
     scan_days = 365 if args.full else 5
     logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] 書類一覧を検索中...")
 
-    # 2. APIから書類一覧を取得
     for i in range(scan_days):
         target_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         docs = get_submitted_documents(target_date)
@@ -356,16 +385,13 @@ def main():
     fail_count = 0
     skip_count = 0
 
-    # 3. XBRL解析ループ（高速Set検索）
     for idx, doc in enumerate(unique_targets, 1):
         sec_code = doc["sec_code"]
         doc_id = str(doc["doc_id"]).strip()
 
-        # 100件ごとにログ出力
         if idx % 100 == 0 or idx == total_targets:
             logger.info(f"⏳ 進捗: [{idx}/{total_targets}] (新規成功: {success_count}, 既処理スキップ: {skip_count}, 解析失敗: {fail_count})")
 
-        # 【超高速化】既に処理済みの doc_id なら即スキップ（XBRL取得を行わない）
         if doc_id in cached_doc_ids:
             skip_count += 1
             continue
@@ -400,14 +426,12 @@ def main():
 
     logger.info(f"解析完了 - 新規取得: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
 
-    # 4. 財務キャッシュと処理済み管理リストの保存
     df_new = df_new.reset_index()
     if not df_cache.reset_index().equals(df_new):
-        df_new.to_csv(CACHE_FILE, index=False)
+        df_new.to_csv(CACHE_FILE, index=False, encoding="utf-8-sig")
         logger.info(f"🎉 財務キャッシュ ({CACHE_FILE}) を更新しました。")
 
-    # 処理済み doc_id 履歴を保存
-    pd.DataFrame({"doc_id": list(cached_doc_ids)}).to_csv(PROCESSED_FILE, index=False)
+    pd.DataFrame({"doc_id": list(cached_doc_ids)}).to_csv(PROCESSED_FILE, index=False, encoding="utf-8-sig")
     logger.info(f"💾 処理済みリスト ({PROCESSED_FILE}) を更新しました。")
 
 if __name__ == "__main__":
