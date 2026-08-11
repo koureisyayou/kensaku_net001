@@ -163,7 +163,7 @@ def select_best_documents(raw_targets):
             docs,
             key=lambda x: (
                 x.get("period_end") or "",
-                1 if x.get("doc_type") in amendment_types else 0,
+                0 if x.get("doc_type") in amendment_types else 1,  # 通常報告書(1)を訂正書(0)より優先
                 x.get("submit_datetime") or ""
             ),
             reverse=True
