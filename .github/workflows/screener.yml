@@ -56,10 +56,17 @@ jobs:
       - name: HTMLページ生成
         run: python generate_html.py
 
+      # リモートとの差分を事前に取り込んでコミット衝突を回避
+      - name: リモートの最新差分を pull
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+
       - name: キャッシュ(CSV)、履歴データおよびindex.htmlをコミット・プッシュ
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chrono: auto-update financial cache, screening history and index.html"
+          commit_message: "chrono: auto-update financial cache, screening history and index.html [skip ci]"
           file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv index.html'
 
       - name: ログファイルの保存 (Artifact)
@@ -83,7 +90,7 @@ jobs:
     steps:
       - name: GitHub Pages へ正式デプロイ
         id: deployment
-        uses: steps.deployment.outputs.page_url && actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4
 
   notify-on-failure:
     needs: [build-and-screen, deploy-pages]
