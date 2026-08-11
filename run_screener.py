@@ -35,7 +35,7 @@ def load_stock_cache():
                     "market_cap": float(row["market_cap"]) if pd.notnull(row.get("market_cap")) else None,
                     "status": str(row.get("status", "UNKNOWN")),
                     "updated_at": str(row.get("updated_at", "")),
-                    "shares_updated_at": str(row.get("shares_updated_at", ""))  # 株式数の最終取得日
+                    "shares_updated_at": str(row.get("shares_updated_at", ""))
                 }
             logger.info(f"株価・株式数キャッシュ読み込み完了: {len(cache)}件")
             return cache
@@ -106,7 +106,7 @@ def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
         if price <= 0:
             return None, existing_shares, False, "NO_PRICE"
 
-        # 2. 株式数の判定（キャッシュがあれば使い回し、無ければ重い取得を行う）
+        # 2. 株式数の判定（キャッシュがあれば使い回し、無ければ再取得）
         shares = existing_shares
         shares_refreshed = False
 
@@ -124,8 +124,7 @@ def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
 
 def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
     """
-    複数の市場サフィックス (.T, .F, .S, .FUK) を試行し、
-    株価（毎日更新）と株式数（必要時のみ更新）を取得する。
+    複数の市場サフィックス (.T, .F, .S, .FUK) を試行し、株価と株式数を取得する。
     """
     candidate_suffixes = [".T", ".F", ".S", ".FUK"]
     
@@ -133,7 +132,6 @@ def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
     prev_level = yf_logger.level
     yf_logger.setLevel(logging.CRITICAL)
 
-    # キャッシュの株式数と有効期限チェック
     existing_shares = cached_info.get("shares") if cached_info else None
     shares_updated_at = cached_info.get("shares_updated_at", "") if cached_info else ""
     
@@ -183,6 +181,11 @@ def run_pipeline(financial_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     stock_cache = load_stock_cache()
 
+    # --- 補正処理：自己資本比率(equity_ratio)の安全再計算 ---
+    # (純資産 net_assets ÷ 総資産 total_assets) * 100
+    if "net_assets" in financial_df.columns and "total_assets" in financial_df.columns:
+        financial_df["equity_ratio"] = (financial_df["net_assets"] / financial_df["total_assets"]) * 100.0
+
     # 1. 第1段階：一次財務スクリーニング (NCAV > 0 & 自己資本比率 >= 30%)
     financial_df["ncav"] = financial_df["current_assets"] - financial_df["total_liabilities"]
 
@@ -201,13 +204,13 @@ def run_pipeline(financial_df):
         sec_code = str(row["sec_code"])
         cached_info = stock_cache.get(sec_code)
 
-        # 毎日株価を取得（株式数はキャッシュを優先利用）
+        # 株価の取得
         price, shares, market_cap, status, ticker_symbol, shares_updated_at = diagnose_and_fetch_stock_data(
             sec_code, cached_info, today_str
         )
         status_counts[status] = status_counts.get(status, 0) + 1
 
-        # キャッシュの更新（株価と本日の日付を常に最新化）
+        # キャッシュの更新
         stock_cache[sec_code] = {
             "ticker": ticker_symbol,
             "price": price,
@@ -232,6 +235,9 @@ def run_pipeline(financial_df):
                     "net_cash_ratio": (row.get("cash_and_equivalents", 0) - row.get("total_liabilities", 0)) / market_cap
                 })
                 results.append(item)
+
+        # サーバー負荷軽減用ウェイト（0.2秒）
+        time.sleep(0.2)
 
     # 最新キャッシュの保存
     save_stock_cache(stock_cache)
