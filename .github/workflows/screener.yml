@@ -2,8 +2,10 @@ name: Net-Net Stock Screener Pipeline
 
 on:
   schedule:
+    # 平日 18:00 JST (09:00 UTC) : 差分更新
     - cron: '0 9 * * 1-5'
-    - cron: '0 15 * * 6'
+    # 土曜 00:00 JST (金曜 15:00 UTC) : 週末フルスキャン
+    - cron: '0 15 * * 5'
   workflow_dispatch:
     inputs:
       full_scan:
@@ -37,7 +39,8 @@ jobs:
         env:
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
-          if [ "${{ github.event.inputs.full_scan }}" = "true" ] || [ "$(date +%u)" = "7" ]; then
+          # 手動実行でfull_scanがtrue、または金曜15:00 UTC (週末スケジュール) の場合はフルスキャン
+          if [ "${{ github.event.inputs.full_scan }}" = "true" ] || [ "${{ github.event.schedule }}" = "0 15 * * 5" ]; then
             echo "Running FULL SCAN mode..."
             python update_financials.py --full
           else
