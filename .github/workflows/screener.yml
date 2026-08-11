@@ -56,7 +56,8 @@ jobs:
       - name: キャッシュ(CSV)およびindex.htmlをコミット・プッシュ
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chrono: auto-update financial, stock cache and index.html [skip ci]"
+          # [skip ci] を削除してPages側が正しくトリガーされるように修正
+          commit_message: "chrono: auto-update financial, stock cache and index.html"
           file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv index.html'
 
       - name: ログファイルの保存 (Artifact)
