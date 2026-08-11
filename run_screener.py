@@ -3,7 +3,7 @@ import sys
 import logging
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 
 CACHE_FILE = "financial_cache.csv"
 STOCK_CACHE_FILE = "stock_cache.csv"
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 EXCLUDE_CODES = set([
-    # 金融・REIT等の除外コード
+    # 金融・REIT等の除外コード（必要に応じて追加）
 ])
 
 def is_excluded_category(sec_code, filer_name):
@@ -34,6 +34,10 @@ def is_excluded_category(sec_code, filer_name):
     return False
 
 def load_stock_cache(today_str):
+    """
+    当日分の株価キャッシュを読み込む。
+    旧ステータスとの後方互換性も保持。
+    """
     if not os.path.exists(STOCK_CACHE_FILE):
         return {}
     try:
@@ -43,24 +47,37 @@ def load_stock_cache(today_str):
         cache = {}
         for _, row in df_today.iterrows():
             sec_code = str(row["sec_code"]).strip()
-            status = str(row.get("status", "OK"))
+            status = str(row.get("status", "SUCCESS"))
             
-            if status == "NO_DATA":
-                cache[sec_code] = (None, None, "NO_DATA")
+            # 旧ステータス互換処理
+            if status in ["OK", "SUCCESS"]:
+                status = "SUCCESS"
+            elif status in ["NO_DATA", "NO_PRICE"]:
+                status = "NO_PRICE"
             else:
-                m_cap = float(row["market_cap"]) if pd.notna(row.get("market_cap")) else None
-                prc = float(row["price"]) if pd.notna(row.get("price")) else None
-                cache[sec_code] = (m_cap, prc, "OK")
+                continue  # NO_SHARES や YF_ERROR などの一時失敗はキャッシュから除外
+
+            m_cap = float(row["market_cap"]) if pd.notna(row.get("market_cap")) else None
+            prc = float(row["price"]) if pd.notna(row.get("price")) else None
+            
+            cache[sec_code] = (m_cap, prc, status)
         return cache
     except Exception as e:
         logger.warning(f"株価キャッシュ読み込みエラー: {e}")
         return {}
 
 def save_stock_cache(stock_cache_data, today_str):
+    """
+    株価キャッシュをCSVに保存する（SUCCESS および 確実な永続失敗である NO_PRICE のみ）。
+    """
     try:
         records = []
         for sec_code, item in stock_cache_data.items():
             market_cap, price, status = item
+            # NO_SHARES や YF_ERROR はキャッシュへ書き込まない（次回再試行できるようにする）
+            if status not in ["SUCCESS", "NO_PRICE"]:
+                continue
+
             records.append({
                 "sec_code": sec_code,
                 "market_cap": market_cap if market_cap is not None else "",
@@ -81,47 +98,93 @@ def normalize_sec_code(sec_code_raw):
     return code_str.upper()
 
 def get_stock_data_from_yahoo(sec_code):
-    ticker_symbol = f"{sec_code}.T"
+    """
+    1. Ticker.history() で株価取得
+    2. Ticker.get_shares_full() で発行済株式数取得
+    3. 時価総額 = 株価 × 発行済株式数 で計算
     
-    yf_logger = logging.getLogger('yfinance')
+    Returns:
+        (market_cap, price, status)
+        - SUCCESS: 株価・株式数ともに取得成功し、時価総額算出完了
+        - NO_PRICE: 株価の取得に失敗
+        - NO_SHARES: 株価は取れたが株式数の取得に失敗（※キャッシュ非対象）
+        - YF_ERROR: 予期せぬ例外（※キャッシュ非対象）
+    """
+    ticker_symbol = f"{sec_code}.T"
+
+    yf_logger = logging.getLogger("yfinance")
     previous_level = yf_logger.level
     yf_logger.setLevel(logging.CRITICAL)
 
     try:
         ticker = yf.Ticker(ticker_symbol)
-        hist = ticker.history(period="5d")
-        
+
+        # --------------------------------------------------
+        # ① 株価取得 (Price)
+        # --------------------------------------------------
+        hist = ticker.history(period="5d", auto_adjust=False)
+
         if hist.empty or "Close" not in hist.columns:
-            return None, None
-            
-        price = float(hist["Close"].iloc[-1])
+            logger.warning(f"NO_PRICE: {ticker_symbol} - historyが空またはClose列なし")
+            return None, None, "NO_PRICE"
+
+        close_series = hist["Close"].dropna()
+        if close_series.empty:
+            logger.warning(f"NO_PRICE: {ticker_symbol} - 有効なCloseデータなし")
+            return None, None, "NO_PRICE"
+
+        price = float(close_series.iloc[-1])
         if price <= 0:
-            return None, None
+            logger.warning(f"NO_PRICE: {ticker_symbol} - 株価が0以下: {price}")
+            return None, None, "NO_PRICE"
 
-        info = ticker.fast_info
-        market_cap = info.get("marketCap", None)
+        # --------------------------------------------------
+        # ② 発行済株式数取得 (Shares) & 時価総額計算
+        # --------------------------------------------------
+        shares = None
+        try:
+            # 直近30日分の株式数履歴データを取得（最新値を利用）
+            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            shares_series = ticker.get_shares_full(start=start_date)
 
-        if not market_cap:
-            shares = info.get("shares", None)
-            if shares and shares > 0:
-                market_cap = price * shares
+            if shares_series is not None and not shares_series.empty:
+                shares_series = shares_series.dropna()
+                if not shares_series.empty:
+                    shares = float(shares_series.iloc[-1])
+        except Exception as e:
+            logger.debug(f"get_shares_full 取得失敗 ({ticker_symbol}): {e}")
 
-        if market_cap and market_cap > 0:
-            return float(market_cap), float(price)
+        # 株式数が取れなかった場合のフォールバック（fast_info の shares のみ参照）
+        if shares is None or shares <= 0:
+            try:
+                fast_shares = ticker.fast_info.get("shares")
+                if fast_shares is not None and float(fast_shares) > 0:
+                    shares = float(fast_shares)
+            except Exception:
+                pass
 
-    except Exception:
-        pass
+        # 株式数取得失敗判定
+        if shares is None or shares <= 0:
+            logger.warning(f"NO_SHARES: {ticker_symbol} - 株価取得成功({price:.1f}円)だが株式数取得不可")
+            return None, price, "NO_SHARES"
+
+        # 時価総額を算出
+        market_cap = price * shares
+        return float(market_cap), float(price), "SUCCESS"
+
+    except Exception as e:
+        logger.exception(f"YF_ERROR: {ticker_symbol} - 予期せぬ例外が発生しました: {e}")
+        return None, None, "YF_ERROR"
+
     finally:
         yf_logger.setLevel(previous_level)
-
-    return None, None
 
 def main():
     logger.info("=== スクリーニング処理を開始します ===")
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     if not os.path.exists(CACHE_FILE):
-        logger.error(f"キャッシュファイル ({CACHE_FILE}) が見つかりません。")
+        logger.error(f"財務キャッシュファイル ({CACHE_FILE}) が見つかりません。")
         generate_empty_html("財務キャッシュファイルが存在しません。")
         return
 
@@ -130,7 +193,6 @@ def main():
         df["current_assets"] = pd.to_numeric(df.get("current_assets"), errors="coerce").fillna(0)
         df["total_liabilities"] = pd.to_numeric(df.get("total_liabilities"), errors="coerce").fillna(0)
         
-        # equity_ratio を 0.0 ~ 1.0 (割合) に統一変換
         raw_eq = pd.to_numeric(df.get("equity_ratio"), errors="coerce").fillna(0)
         df["equity_ratio_norm"] = raw_eq.apply(lambda x: x / 100.0 if x > 1.0 else x)
 
@@ -141,14 +203,20 @@ def main():
 
     stock_cache = load_stock_cache(today_str)
     
-    # 【改修点②】ログ用の詳細カウンター
-    fetches_attempted = 0
-    fetches_successful = 0
-    fetches_no_data = 0
+    total_tickers = len(df)
+    financial_passed = 0
+    cached_count = 0
+    new_fetch_count = 0
+    
+    status_counts = {
+        "SUCCESS": 0,
+        "NO_PRICE": 0,
+        "NO_SHARES": 0,
+        "YF_ERROR": 0
+    }
     
     results = []
-
-    logger.info(f"全対象銘柄数: {len(df)} 件")
+    logger.info(f"全対象銘柄数: {total_tickers} 件")
 
     for idx, row in df.iterrows():
         sec_code = normalize_sec_code(row.get("sec_code", ""))
@@ -169,30 +237,24 @@ def main():
         if ncav <= 0 or norm_equity_ratio < 0.3:
             continue
 
-        # 株価キャッシュ確認＆取得
-        market_cap, price = None, None
-        if sec_code in stock_cache:
-            m_cap, prc, status = stock_cache[sec_code]
-            if status == "NO_DATA":
-                continue  # 本日取得失敗済みの銘柄はスキップ
-            market_cap, price = m_cap, prc
-        else:
-            fetches_attempted += 1
-            market_cap, price = get_stock_data_from_yahoo(sec_code)
-            
-            if market_cap and price:
-                fetches_successful += 1
-                stock_cache[sec_code] = (market_cap, price, "OK")
-            else:
-                fetches_no_data += 1
-                stock_cache[sec_code] = (None, None, "NO_DATA")
-                continue
+        financial_passed += 1
 
-        if market_cap and market_cap > 0:
-            # NC比率 = NCAV / 時価総額
-            nc_ratio = round(ncav / market_cap, 2)
+        # --- 株価・時価総額 取得処理 ---
+        if sec_code in stock_cache:
+            market_cap, price, status = stock_cache[sec_code]
+            cached_count += 1
+        else:
+            market_cap, price, status = get_stock_data_from_yahoo(sec_code)
+            new_fetch_count += 1
+            status_counts[status] = status_counts.get(status, 0) + 1
             
-            # 基本スクリーニング判定
+            # 一時障害(NO_SHARES / YF_ERROR) 以外のみ当日分キャッシュへ追加
+            if status in ["SUCCESS", "NO_PRICE"]:
+                stock_cache[sec_code] = (market_cap, price, status)
+
+        # スクリーニング判定 (NC比率 >= 1.0 かつ 時価総額 <= 500億円)
+        if market_cap and market_cap > 0:
+            nc_ratio = round(ncav / market_cap, 2)
             if nc_ratio >= 1.0 and market_cap <= 50_000_000_000:
                 results.append({
                     "sec_code": sec_code,
@@ -205,8 +267,8 @@ def main():
                     "submit_date": submit_date
                 })
 
-    # 新規問い合わせが発生した場合のみ当日分キャッシュを更新保存
-    if fetches_attempted > 0:
+    # 新規問い合わせが発生した場合はキャッシュをCSVへ更新保存
+    if new_fetch_count > 0:
         save_stock_cache(stock_cache, today_str)
 
     results_df = pd.DataFrame(results)
@@ -215,11 +277,18 @@ def main():
 
     generate_html(results_df)
     
-    # 分かりやすいログ出力
-    logger.info(
-        f"スクリーニング完了 - 検出件数: {len(results_df)} 件 | "
-        f"株価取得実行: {fetches_attempted} 件 (成功: {fetches_successful} 件 / NO_DATA: {fetches_no_data} 件)"
-    )
+    # トラッキングサマリー出力
+    logger.info("=== スクリーニング実行結果 summary ===")
+    logger.info(f"全対象銘柄数            : {total_tickers} 件")
+    logger.info(f"財務条件通過 (NCAV>0/自己資本比率>=30%): {financial_passed} 件")
+    logger.info(f"株価データ取得内訳      : 既存キャッシュ {cached_count} 件 / 新規取得 {new_fetch_count} 件")
+    if new_fetch_count > 0:
+        logger.info(f"  ├ SUCCESS       : {status_counts['SUCCESS']} 件")
+        logger.info(f"  ├ NO_PRICE      : {status_counts['NO_PRICE']} 件")
+        logger.info(f"  ├ NO_SHARES     : {status_counts['NO_SHARES']} 件（※再試行対象・未キャッシュ）")
+        logger.info(f"  └ YF_ERROR      : {status_counts['YF_ERROR']} 件（※再試行対象・未キャッシュ）")
+    logger.info(f"最終検出件数 (NC比率>=1.0 & 時価総額<=500億): {len(results_df)} 件")
+    logger.info("==========================================")
 
 def generate_empty_html(message):
     html_content = f"<!DOCTYPE html><html lang='ja'><body><h2>ネットネット株スクリーナー</h2><p>{message}</p></body></html>"
