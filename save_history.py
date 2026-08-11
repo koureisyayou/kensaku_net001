@@ -66,10 +66,9 @@ def append_to_history():
     )
 
     # ==============================
-    # 6. ソートとランキング明示
-    # (NCAV/時価総額比率の降順でソート後、順位付与)
+    # 6. ランキング
+    # (run_screener.py の出力順を尊重して順位を付与)
     # ==============================
-    df = df.sort_values("nc_ratio", ascending=False).reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)
 
     # ==============================
@@ -81,7 +80,7 @@ def append_to_history():
         return pd.Series([None] * len(df))
 
     # ==============================
-    # 8. 履歴データ作成（指標の定義通りのマッピング）
+    # 8. 履歴データ作成（定義通りのマッピング）
     # ==============================
     history_df = pd.DataFrame({
         "date": today,
@@ -119,7 +118,7 @@ def append_to_history():
             ignore_index=True
         )
 
-        # [date, sec_code] の組み合わせで重複を排除（後に結合された新規データを残す）
+        # [date, sec_code] の組み合わせで重複排除（最新を保持）
         history = combined.drop_duplicates(
             subset=["date", "sec_code"],
             keep="last"
