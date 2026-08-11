@@ -138,7 +138,15 @@ def select_best_documents(raw_targets):
 def parse_clean_amount(element):
     if not element or not element.text:
         return None
-    
+
+    # 【追加】単位（unitRef）に日・株・比率などが含まれる非金額要素を除外
+    unit_ref = str(element.get("unitRef") or element.get("unitref") or "").lower()
+    if unit_ref:
+        # 除外したい単位キーワード
+        invalid_units = ["day", "share", "pure", "person", "month", "year"]
+        if any(bad in unit_ref for bad in invalid_units):
+            return None
+
     text_val = element.text.strip().replace(",", "")
     try:
         val = float(text_val)
@@ -219,10 +227,11 @@ def fetch_xbrl_data(doc_id, sec_code):
                 tl_val, _, tl_tag    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"], "総負債")
                 ta_val, _, ta_tag    = get_tag_value(["Assets", "AssetsTotal"], "総資産")
                 
+                # 広すぎる "Equity" を除外し、明確な純資産タグのみに限定
                 eq_val, _, eq_tag    = get_tag_value([
-                    "EquityAttributableToOwnersOfParent",
-                    "NetAssets",
-                    "Equity"
+                    "EquityAttributableToOwnersOfParent",  # IFRS
+                    "NetAssets",                           # 日本基準
+                    "SharesOfAggregateAmountOfNetAssets"   # 補足用
                 ], "純資産/持分")
 
                 is_ifrs = any("AssetsCurrent" in e.name for e in soup.find_all() if e.name)
