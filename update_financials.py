@@ -16,6 +16,11 @@ PROCESSED_FILE = "processed_docs.csv"
 LOG_FILE = "update_financials.log"
 JST = timezone(timedelta(hours=9))
 
+# 訂正報告書(130/150/170)を原本より優先するか。
+# 訂正報告書は差分のみでXBRLが不完全なことが多いため、既定は False（原本優先）。
+PREFER_AMENDMENT = False
+AMENDMENT_TYPES = {"130", "150", "170"}
+
 # ログ設定
 logging.basicConfig(
     level=logging.INFO,
@@ -30,10 +35,34 @@ logger = logging.getLogger(__name__)
 # EDINET API 設定
 EDINET_API_KEY = os.environ.get("EDINET_API_KEY", "")
 
+# ------------------------------------------------------------------
+# 抽出対象のXBRL要素名（ローカル名の完全一致で判定する）
+#   J-GAAP  : jppfs_cor    例) Assets / Liabilities / CurrentAssets / NetAssets
+#   IFRS    : jpigp_cor    例) AssetsIFRS / LiabilitiesIFRS / CurrentAssetsIFRS
+# 部分一致(endswith)を使うと CurrentAssets が Assets に、NetAssets が Assets に
+# 誤ヒットして総資産・総負債が別科目に化けるため、完全一致にしている。
+# ------------------------------------------------------------------
+TAGS_CURRENT_ASSETS = ["CurrentAssets", "CurrentAssetsIFRS", "AssetsCurrent"]
+TAGS_TOTAL_LIABILITIES = ["Liabilities", "LiabilitiesIFRS"]
+TAGS_TOTAL_ASSETS = ["Assets", "AssetsIFRS"]
+TAGS_EQUITY = [
+    "EquityAttributableToOwnersOfParentIFRS",
+    "NetAssets",
+    "EquityIFRS",
+    "EquityAttributableToOwnersOfParent",
+]
+TAGS_CASH = [
+    "CashAndDeposits",
+    "CashAndCashEquivalentsIFRS",
+    "CashAndCashEquivalents",
+]
+
+
 def get_edinet_headers():
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
+
 
 def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor=1.0):
     for i in range(retries):
@@ -47,31 +76,10 @@ def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor
         time.sleep(backoff_factor * (2 ** i))
     return None
 
-def enforce_dtypes(df):
-    if df.empty:
-        return df
-
-    string_cols = [
-        "sec_code", "filer_name", "doc_id", "doc_type", "submit_date",
-        "equity_type", "accounting_standard", "consolidated", "fiscal_period"
-    ]
-    numeric_cols = [
-        "current_assets", "total_liabilities", "total_assets", "equity_value", "equity_ratio"
-    ]
-
-    for col in string_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    return df
 
 def get_submitted_documents(date_str):
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
-    
+
     params = {
         "date": date_str,
         "type": 2,
@@ -118,30 +126,30 @@ def get_submitted_documents(date_str):
         logger.error(f"[{date_str}] 書類一覧パース失敗: {e}")
         return []
 
+
 def select_best_documents(raw_targets):
+    """証券コードごとに1件だけ採用する。決算期が新しいものを最優先。"""
     grouped = {}
     for doc in raw_targets:
-        code = doc["sec_code"]
-        if code not in grouped:
-            grouped[code] = []
-        grouped[code].append(doc)
+        grouped.setdefault(doc["sec_code"], []).append(doc)
 
-    amendment_types = {"130", "150", "170"}
     selected = []
-
     for code, docs in grouped.items():
         docs_sorted = sorted(
             docs,
             key=lambda x: (
                 x.get("period_end") or "",
-                0 if x.get("doc_type") in amendment_types else 1,
+                # reverse=True でソートするため「大きい値ほど優先」になる点に注意
+                (1 if x.get("doc_type") in AMENDMENT_TYPES else 0) if PREFER_AMENDMENT
+                else (0 if x.get("doc_type") in AMENDMENT_TYPES else 1),
                 x.get("submit_datetime") or ""
             ),
             reverse=True
         )
         selected.append(docs_sorted[0])
-        
+
     return selected
+
 
 def parse_clean_amount(element):
     if not element or not element.text:
@@ -168,27 +176,48 @@ def parse_clean_amount(element):
 
     return int(val)
 
-def extract_valid_contexts(soup):
-    instant_contexts = set()
-    consolidated_contexts = set()
-    
+
+def build_context_ranks(soup):
+    """
+    残高科目に使える instant コンテキストへ優先順位を付ける。
+      0: 当期・連結（ディメンション無し・CurrentYear）
+      1: 当期・連結（四半期/半期など CurrentYear 以外の当期 instant）
+      2: 当期・個別（NonConsolidatedMember のみ・CurrentYear）
+      3: 当期・個別（上記以外）
+    前期(Prior)・提出日時点(FilingDate)・セグメント等の内訳は採用しない。
+    """
+    ranks = {}
+    has_nonconsolidated = False
+
     for ctx in soup.find_all(["context", "xbrli:context"]):
         ctx_id = ctx.get("id")
         if not ctx_id:
             continue
-            
-        if ctx.find(["instant", "xbrli:instant"]):
-            instant_contexts.add(ctx_id)
-            
-        ctx_str = str(ctx).lower()
-        if "consolidated" in ctx_str and "nonconsolidated" not in ctx_str:
-            consolidated_contexts.add(ctx_id)
-            
-    return instant_contexts, consolidated_contexts
+
+        # 連結を出している会社かどうかの判定材料（Prior も含めて走査する）
+        if "NonConsolidated" in ctx_id:
+            has_nonconsolidated = True
+
+        if not ctx.find(["instant", "xbrli:instant"]):
+            continue  # 期間(duration)コンテキストは残高科目に使わない
+        if "Prior" in ctx_id or "FilingDate" in ctx_id:
+            continue
+
+        member_count = ctx_id.count("Member")
+        is_current_year = "CurrentYear" in ctx_id
+
+        if member_count == 0:
+            ranks[ctx_id] = 0 if is_current_year else 1
+        elif member_count == 1 and "NonConsolidated" in ctx_id:
+            ranks[ctx_id] = 2 if is_current_year else 3
+        # それ以外（セグメント別・株式種類別などの内訳）は採用しない
+
+    return ranks, has_nonconsolidated
+
 
 def fetch_xbrl_data(doc_id, sec_code):
     url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
-    
+
     params = {
         "type": 1,
         "Subscription-Key": EDINET_API_KEY
@@ -201,73 +230,92 @@ def fetch_xbrl_data(doc_id, sec_code):
             return None
 
         with zipfile.ZipFile(io.BytesIO(res.content)) as z:
-            xbrl_filename = next((name for name in z.namelist() if name.endswith(".xbrl") and "PublicDoc" in name), None)
+            xbrl_filename = next(
+                (name for name in z.namelist() if name.endswith(".xbrl") and "PublicDoc" in name),
+                None
+            )
             if not xbrl_filename:
                 return None
 
             with z.open(xbrl_filename) as f:
-                # lxml-xmlの代わりに標準パーサーまたは分解処理を徹底
                 soup = BeautifulSoup(f.read(), "lxml-xml")
-                instant_ctxs, cons_ctxs = extract_valid_contexts(soup)
+                ctx_ranks, has_nonconsolidated = build_context_ranks(soup)
+
+                if not ctx_ranks:
+                    soup.decompose()
+                    return None
 
                 def get_tag_value(tag_names):
+                    """優先順位が最も高いコンテキストの値を返す -> (値, rank, タグ名)"""
                     for tag in tag_names:
-                        elements = soup.find_all(lambda e: e.name and e.name.endswith(tag) and not e.name.endswith("Abstract"))
-                        
-                        for el in elements:
-                            ctx = el.get("contextRef", "")
-                            if ctx in instant_ctxs and (ctx in cons_ctxs or "Consolidated" in ctx):
-                                val = parse_clean_amount(el)
-                                if val is not None:
-                                    return val, True, tag
+                        best = None
+                        for el in soup.find_all(lambda e: e.name == tag):
+                            rank = ctx_ranks.get(el.get("contextRef") or "")
+                            if rank is None:
+                                continue
+                            val = parse_clean_amount(el)
+                            if val is None:
+                                continue
+                            if best is None or rank < best[0]:
+                                best = (rank, val)
+                                if rank == 0:
+                                    break
+                        if best is not None:
+                            return best[1], best[0], tag
+                    return None, None, None
 
-                        for el in elements:
-                            ctx = el.get("contextRef", "")
-                            if ctx in instant_ctxs:
-                                val = parse_clean_amount(el)
-                                if val is not None:
-                                    return val, False, tag
+                ca_val, ca_rank, ca_tag = get_tag_value(TAGS_CURRENT_ASSETS)
+                tl_val, _, tl_tag = get_tag_value(TAGS_TOTAL_LIABILITIES)
+                ta_val, _, ta_tag = get_tag_value(TAGS_TOTAL_ASSETS)
+                eq_val, _, eq_tag = get_tag_value(TAGS_EQUITY)
+                cash_val, _, _ = get_tag_value(TAGS_CASH)
 
-                    return None, False, None
+                used_tags = [t for t in (ca_tag, tl_tag, ta_tag, eq_tag) if t]
+                accounting_std = "IFRS" if any(t.endswith("IFRS") for t in used_tags) else "J-GAAP"
 
-                ca_val, cons, ca_tag = get_tag_value(["CurrentAssets", "AssetsCurrent"])
-                tl_val, _, tl_tag    = get_tag_value(["Liabilities", "LiabilitiesTotal", "LiabilitiesCurrentAndNonCurrent"])
-                ta_val, _, ta_tag    = get_tag_value(["Assets", "AssetsTotal"])
-                
-                eq_val, _, eq_tag    = get_tag_value([
-                    "EquityAttributableToOwnersOfParent",
-                    "NetAssets",
-                    "SharesOfAggregateAmountOfNetAssets"
-                ])
+                # 連結・個別の判定
+                # 個別しか出していない会社には NonConsolidatedMember 自体が付かないため、
+                # 「NonConsolidated コンテキストが存在する会社の、ディメンション無しの値」を連結とみなす。
+                consolidated = bool(has_nonconsolidated) and ca_rank is not None and ca_rank <= 1
 
-                is_ifrs = any("AssetsCurrent" in e.name for e in soup.find_all() if e.name)
-                accounting_std = "IFRS" if is_ifrs else "J-GAAP"
-
-                # BeautifulSoup ツリーの明確なメモリ破棄（重要）
                 soup.decompose()
 
-                if (ca_val is not None and 
-                    tl_val is not None and 
-                    ta_val is not None and 
-                    eq_val is not None and 
-                    ta_val > 0):
-                    
-                    equity_ratio = round(eq_val / ta_val, 4)
-                    return {
-                        "current_assets": ca_val,
-                        "total_liabilities": tl_val,
-                        "total_assets": ta_val,
-                        "equity_value": eq_val,
-                        "equity_type": eq_tag or "Unknown",
-                        "equity_ratio": equity_ratio,
-                        "consolidated": cons,
-                        "accounting_standard": accounting_std
-                    }
-                    
+                if None in (ca_val, tl_val, ta_val, eq_val):
+                    return None
+                if ta_val <= 0:
+                    return None
+
+                # 整合性チェック：科目の取り違えを検知して捨てる
+                if ca_val > ta_val * 1.05:
+                    logger.warning(f"[{sec_code}] 流動資産 > 総資産 のため破棄 (ca={ca_val}, ta={ta_val})")
+                    return None
+                if tl_val > ta_val * 1.05:
+                    logger.warning(f"[{sec_code}] 負債 > 総資産 のため破棄 (tl={tl_val}, ta={ta_val})")
+                    return None
+                if eq_val > ta_val * 1.05:
+                    logger.warning(f"[{sec_code}] 純資産 > 総資産 のため破棄 (eq={eq_val}, ta={ta_val})")
+                    return None
+
+                # 自己資本比率は「％」で保存する（下流で単位を推測しないため）
+                equity_ratio = round(eq_val / ta_val * 100.0, 2)
+
+                return {
+                    "current_assets": ca_val,
+                    "total_liabilities": tl_val,
+                    "total_assets": ta_val,
+                    "equity_value": eq_val,
+                    "equity_type": eq_tag or "Unknown",
+                    "equity_ratio": equity_ratio,
+                    "cash_and_equivalents": cash_val,
+                    "consolidated": consolidated,
+                    "accounting_standard": accounting_std
+                }
+
     except Exception as e:
         logger.error(f"[{sec_code}] XBRL解析例外 (doc_id={doc_id}): {e}")
 
     return None
+
 
 def main():
     parser = argparse.ArgumentParser(description="EDINET Financial Cache Updater")
@@ -275,18 +323,18 @@ def main():
     args = parser.parse_args()
 
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
-    
+
     if not EDINET_API_KEY:
         logger.error("❌ ERROR: EDINET_API_KEY が設定されていません。環境変数を確認してください。")
         sys.exit(1)
 
     columns = [
-        "sec_code", "filer_name", "current_assets", "total_liabilities", 
-        "total_assets", "equity_value", "equity_type", "equity_ratio", 
-        "doc_id", "submit_date", "doc_type", "accounting_standard", 
-        "consolidated", "fiscal_period"
+        "sec_code", "filer_name", "current_assets", "total_liabilities",
+        "total_assets", "equity_value", "equity_type", "equity_ratio",
+        "cash_and_equivalents", "doc_id", "submit_date", "doc_type",
+        "accounting_standard", "consolidated", "fiscal_period"
     ]
-    
+
     DTYPE_SPEC = {
         "sec_code": "string",
         "filer_name": "string",
@@ -300,7 +348,8 @@ def main():
     }
 
     NUMERIC_COLS = [
-        "current_assets", "total_liabilities", "total_assets", "equity_value", "equity_ratio"
+        "current_assets", "total_liabilities", "total_assets",
+        "equity_value", "equity_ratio", "cash_and_equivalents"
     ]
 
     if os.path.exists(CACHE_FILE):
@@ -322,6 +371,11 @@ def main():
     else:
         df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
 
+    # 新設列（cash_and_equivalents など）が無い旧キャッシュへの追随
+    for col in columns:
+        if col != "sec_code" and col not in df_cache.columns:
+            df_cache[col] = pd.NA
+
     cached_doc_ids = set()
     if os.path.exists(PROCESSED_FILE):
         try:
@@ -329,7 +383,7 @@ def main():
             cached_doc_ids = set(df_proc["doc_id"].dropna().str.strip())
         except Exception:
             pass
-    
+
     if "doc_id" in df_cache.columns:
         cached_doc_ids.update(df_cache["doc_id"].dropna().astype(str).str.strip().tolist())
 
@@ -376,6 +430,7 @@ def main():
                     "equity_value": fin["equity_value"],
                     "equity_type": fin["equity_type"],
                     "equity_ratio": fin["equity_ratio"],
+                    "cash_and_equivalents": fin["cash_and_equivalents"],
                     "doc_id": doc_id,
                     "submit_date": doc["submit_date"],
                     "doc_type": doc["doc_type"],
@@ -403,10 +458,10 @@ def main():
     pd.DataFrame({"doc_id": list(cached_doc_ids)}).to_csv(PROCESSED_FILE, index=False, encoding="utf-8-sig")
     logger.info(f"💾 処理済みリスト ({PROCESSED_FILE}) を更新しました。")
 
-    # ログ出力バッファを強制排出して明確にプロセスを閉じる
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
+
 
 if __name__ == "__main__":
     main()
