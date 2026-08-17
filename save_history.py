@@ -26,7 +26,14 @@ def append_to_history():
         return
 
     # ==============================
-    # 3. 必須列チェック
+    # 3. 社名列のフォールバック
+    #    （candidates 側が filer_name しか持っていない場合に備える）
+    # ==============================
+    if "company_name" not in df.columns and "filer_name" in df.columns:
+        df["company_name"] = df["filer_name"]
+
+    # ==============================
+    # 4. 必須列チェック
     # ==============================
     required_columns = [
         "sec_code",
@@ -49,14 +56,14 @@ def append_to_history():
         return
 
     # ==============================
-    # 4. 日本時間の日付
+    # 5. 日本時間の日付
     # ==============================
     today = datetime.now(
         ZoneInfo("Asia/Tokyo")
     ).strftime("%Y-%m-%d")
 
     # ==============================
-    # 5. 証券コードの整形（文字列・空白除去）
+    # 6. 証券コードの整形（文字列・空白除去）
     # ==============================
     df["sec_code"] = (
         df["sec_code"]
@@ -66,21 +73,23 @@ def append_to_history():
     )
 
     # ==============================
-    # 6. ランキング
+    # 7. ランキング
     # (run_screener.py の出力順を尊重して順位を付与)
     # ==============================
+    df = df.reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)
 
     # ==============================
-    # 7. 任意列取得用ヘルパー
+    # 8. 任意列取得用ヘルパー
+    #    （インデックスを df に揃えないと結合時に値がずれる）
     # ==============================
     def get_column(column):
         if column in df.columns:
             return df[column]
-        return pd.Series([None] * len(df))
+        return pd.Series([None] * len(df), index=df.index)
 
     # ==============================
-    # 8. 履歴データ作成（定義通りのマッピング）
+    # 9. 履歴データ作成（定義通りのマッピング）
     # ==============================
     history_df = pd.DataFrame({
         "date": today,
@@ -100,7 +109,7 @@ def append_to_history():
     })
 
     # ==============================
-    # 9. 既存履歴の読み込みと結合・同日同銘柄の重複排除
+    # 10. 既存履歴の読み込みと結合・同日同銘柄の重複排除
     # ==============================
     if os.path.exists(HISTORY_FILE):
 
@@ -109,16 +118,13 @@ def append_to_history():
             dtype={"date": str, "sec_code": str}
         )
 
-        # 日付を文字列として統一
         history["date"] = history["date"].astype(str)
 
-        # 新規データを末尾に結合
         combined = pd.concat(
             [history, history_df],
             ignore_index=True
         )
 
-        # [date, sec_code] の組み合わせで重複排除（最新を保持）
         history = combined.drop_duplicates(
             subset=["date", "sec_code"],
             keep="last"
@@ -128,7 +134,7 @@ def append_to_history():
         history = history_df
 
     # ==============================
-    # 10. 並び替え（日付順・順位順）
+    # 11. 並び替え（日付順・順位順）
     # ==============================
     history = history.sort_values(
         ["date", "rank"],
@@ -136,7 +142,7 @@ def append_to_history():
     )
 
     # ==============================
-    # 11. 保存
+    # 12. 保存
     # ==============================
     history.to_csv(
         HISTORY_FILE,
