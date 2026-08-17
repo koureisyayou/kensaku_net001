@@ -18,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger("NetNetScreener")
 
 CACHE_FILE = "stock_cache.csv"
+INVALID_FILE = "invalid_financials.csv"   # 妥当性チェックで弾いた行の記録
 SHARES_CACHE_DAYS = 30  # 株式数キャッシュの有効期限（日）
 
 # 東証のみを対象にする。
@@ -28,6 +29,9 @@ CANDIDATE_SUFFIXES = [".T"]
 # スクリーニング条件
 MIN_EQUITY_RATIO = 30.0   # 自己資本比率(%)
 MIN_NC_RATIO = 1.0        # NCAV / 時価総額
+
+# 財務データの許容誤差（端数・単位差を吸収するための係数）
+TOLERANCE = 1.05
 
 
 def load_stock_cache():
@@ -91,8 +95,11 @@ def to_percent(val):
     キャッシュを --full で作り直した後は削除して構わない。
     """
     if pd.isnull(val):
-        return 0.0
-    val = float(val)
+        return None
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return None
     if 0 < val <= 1.0:
         return val * 100.0
     return val
@@ -222,23 +229,75 @@ def prepare_financials(financial_df):
         financial_df["company_name"] = ""
     financial_df["company_name"] = financial_df["company_name"].fillna("")
 
-    # 自己資本比率：無ければ純資産/総資産から計算し、単位は％に統一する
+    # 自己資本比率の単位を％に統一する。
+    # ※ equity_value / total_assets からの再計算はしない。
+    #    旧キャッシュには両方とも誤抽出された行が含まれており、再計算すると
+    #    1,000% 超のような不正な行を復活させてしまうため。
+    #    比率が欠損している行は validate_financials で除外する。
     if "equity_ratio" not in financial_df.columns:
-        financial_df["equity_ratio"] = pd.NA
-
-    if "equity_value" in financial_df.columns and "total_assets" in financial_df.columns:
-        mask = (
-            financial_df["equity_ratio"].isnull()
-            & financial_df["equity_value"].notnull()
-            & financial_df["total_assets"].notnull()
-            & (financial_df["total_assets"] > 0)
-        )
-        financial_df.loc[mask, "equity_ratio"] = (
-            financial_df.loc[mask, "equity_value"] / financial_df.loc[mask, "total_assets"] * 100.0
-        )
-
+        financial_df["equity_ratio"] = None
     financial_df["equity_ratio"] = financial_df["equity_ratio"].apply(to_percent)
+
+    for col in ("current_assets", "total_liabilities", "total_assets", "equity_value"):
+        if col in financial_df.columns:
+            financial_df[col] = pd.to_numeric(financial_df[col], errors="coerce")
+
     return financial_df
+
+
+def validate_financials(financial_df):
+    """
+    ありえない財務データを除外する。
+    XBRLの科目取り違えは「自己資本比率が100%を超える」「流動資産が総資産を超える」
+    といった形で表面化するので、ここで機械的に落とす。
+    """
+    df = financial_df
+
+    for col in ("current_assets", "total_liabilities", "total_assets"):
+        if col not in df.columns:
+            logger.error(f"財務キャッシュに必須列 {col} がありません。")
+            return df.iloc[0:0], df
+
+    ok = (
+        df["total_assets"].notnull() & (df["total_assets"] > 0)
+        & df["current_assets"].notnull() & (df["current_assets"] >= 0)
+        & df["total_liabilities"].notnull() & (df["total_liabilities"] >= 0)
+        & (df["current_assets"] <= df["total_assets"] * TOLERANCE)
+        & (df["total_liabilities"] <= df["total_assets"] * TOLERANCE)
+        & df["equity_ratio"].notnull()
+        & (df["equity_ratio"] > 0)
+        & (df["equity_ratio"] <= 100.0 * TOLERANCE)
+    )
+
+    if "equity_value" in df.columns:
+        ok = ok & (
+            df["equity_value"].isnull()
+            | (df["equity_value"] <= df["total_assets"] * TOLERANCE)
+        )
+
+    valid_df = df[ok].copy()
+    invalid_df = df[~ok].copy()
+
+    # 端数由来の 100.4% などを整える
+    valid_df["equity_ratio"] = valid_df["equity_ratio"].clip(upper=100.0)
+
+    # 除外が0件でもヘッダーのみのファイルを必ず出力する。
+    # ファイルが存在しないと git-auto-commit-action の file_pattern が
+    # 「pathspec did not match any files」で失敗するため。
+    cols = [c for c in ["sec_code", "filer_name", "company_name", "current_assets",
+                        "total_liabilities", "total_assets", "equity_value",
+                        "equity_ratio", "doc_id", "fiscal_period"] if c in df.columns]
+    invalid_df[cols].to_csv(INVALID_FILE, index=False, encoding="utf-8-sig")
+
+    if not invalid_df.empty:
+        logger.warning(
+            f"⚠ 財務データが不正な {len(invalid_df)} 銘柄を除外しました。"
+            f"内訳は {INVALID_FILE} を確認してください（XBRL抽出の取りこぼしの可能性があります）。"
+        )
+    else:
+        logger.info("財務データの妥当性チェック: 除外0件")
+
+    return valid_df, invalid_df
 
 
 def run_pipeline(financial_df):
@@ -247,6 +306,12 @@ def run_pipeline(financial_df):
     stock_cache = load_stock_cache()
 
     financial_df = prepare_financials(financial_df)
+    financial_df, _ = validate_financials(financial_df)
+    logger.info(f"【妥当性チェック】検証を通過した銘柄: {len(financial_df)}件")
+
+    if financial_df.empty:
+        logger.error("有効な財務データがありません。financial_cache.csv を再生成してください。")
+        return pd.DataFrame()
 
     # 1. 第1段階：一次財務スクリーニング (NCAV > 0 & 自己資本比率 >= 30%)
     financial_df["ncav"] = financial_df["current_assets"] - financial_df["total_liabilities"]
