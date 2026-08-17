@@ -10,7 +10,11 @@ on:
     inputs:
       full_scan:
         type: boolean
-        description: 'フルスキャン（過去データの全件再取得）を実行しますか？'
+        description: 'フルスキャン（過去365日分の書類を検索）を実行しますか？'
+        default: false
+      rebuild:
+        type: boolean
+        description: '財務キャッシュを破棄してゼロから作り直しますか？（処理済みリストも消すため数時間かかります）'
         default: false
 
 permissions:
@@ -19,9 +23,16 @@ permissions:
   id-token: write
   issues: write
 
+# 手動フルスキャンとスケジュール実行が重なるとコミットが衝突するため直列化する
+concurrency:
+  group: net-net-screener
+  cancel-in-progress: false
+
 jobs:
   build-and-screen:
     runs-on: ubuntu-latest
+    # フルスキャン（数千件のXBRLダウンロード）でも打ち切られないように上限を明示
+    timeout-minutes: 350
     steps:
       - name: リポジトリのチェックアウト
         uses: actions/checkout@v4
@@ -35,11 +46,22 @@ jobs:
       - name: 依存ライブラリのインストール
         run: pip install -r requirements.txt
 
+      # rebuild 時のみ既存キャッシュを破棄する。
+      # processed_docs.csv を消さないと、--full を付けても
+      # 「既処理」として全書類がスキップされ、旧ロジックのデータが残り続ける。
+      - name: 財務キャッシュの破棄 (rebuild時のみ)
+        if: ${{ github.event.inputs.rebuild == 'true' }}
+        run: |
+          echo "Discarding financial_cache.csv and processed_docs.csv ..."
+          rm -f financial_cache.csv processed_docs.csv
+
       - name: 財務キャッシュの更新 (日次 vs フルスキャン判定)
         env:
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
-          if [ "${{ github.event.inputs.full_scan }}" = "true" ] || [ "${{ github.event.schedule }}" = "0 15 * * 5" ]; then
+          if [ "${{ github.event.inputs.full_scan }}" = "true" ] \
+            || [ "${{ github.event.inputs.rebuild }}" = "true" ] \
+            || [ "${{ github.event.schedule }}" = "0 15 * * 5" ]; then
             echo "Running FULL SCAN mode..."
             python update_financials.py --full
           else
@@ -56,25 +78,29 @@ jobs:
       - name: HTMLページ生成
         run: python generate_html.py
 
-      # リモートとの差分を事前に取り込んでコミット衝突を回避
+      # 作業ツリーが汚れた状態では通常の pull --rebase は失敗するため autostash を付ける
       - name: リモートの最新差分を pull
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main || true
+          git pull --rebase --autostash origin main || true
 
       - name: キャッシュ(CSV)、履歴データおよびindex.htmlをコミット・プッシュ
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chrono: auto-update financial cache, screening history and index.html [skip ci]"
-          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv index.html'
+          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv index.html'
 
       - name: ログファイルの保存 (Artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: execution-log
-          path: screener.log
+          path: |
+            screener.log
+            update_financials.log
+            invalid_financials.csv
+          if-no-files-found: ignore
 
       - name: GitHub Pages 向けビルド成果物の準備
         uses: actions/upload-pages-artifact@v3
@@ -104,7 +130,6 @@ jobs:
           title: "🚨 [Screener Failure] スクリーニングパイプラインが失敗しました"
           body: |
             ワークフローの実行でエラーが発生しました。ログを確認してください。
-
             - **実行イベント**: ${{ github.event_name }}
             - **実行詳細**: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           assignees: ${{ github.actor }}
