@@ -20,6 +20,16 @@ logger = logging.getLogger("NetNetScreener")
 CACHE_FILE = "stock_cache.csv"
 SHARES_CACHE_DAYS = 30  # 株式数キャッシュの有効期限（日）
 
+# 東証のみを対象にする。
+# ".F"(フランクフルト) や ".S" は海外市場で、価格が外貨建てのため
+# 円建ての NCAV と比較すると時価総額が桁違いに小さく算出されてしまう。
+CANDIDATE_SUFFIXES = [".T"]
+
+# スクリーニング条件
+MIN_EQUITY_RATIO = 30.0   # 自己資本比率(%)
+MIN_NC_RATIO = 1.0        # NCAV / 時価総額
+
+
 def load_stock_cache():
     """株価・株式数・ステータスキャッシュの読み込み"""
     if os.path.exists(CACHE_FILE):
@@ -44,6 +54,7 @@ def load_stock_cache():
             return {}
     return {}
 
+
 def save_stock_cache(cache):
     """株価・株式数・ステータスキャッシュの保存"""
     rows = []
@@ -61,6 +72,31 @@ def save_stock_cache(cache):
     df = pd.DataFrame(rows)
     df.to_csv(CACHE_FILE, index=False, encoding="utf-8")
     logger.info(f"株価・株式数キャッシュ保存完了: {len(df)}件")
+
+
+def safe_get(row, key, default=None):
+    """Series から欠損に強く値を取り出す（列が存在しない場合も default を返す）"""
+    if key in row.index:
+        val = row[key]
+        if pd.notnull(val):
+            return val
+    return default
+
+
+def to_percent(val):
+    """
+    自己資本比率を％に揃える。
+    update_financials.py は％で保存するようになったが、
+    比率(0〜1)で保存された旧 financial_cache.csv との互換のために残している。
+    キャッシュを --full で作り直した後は削除して構わない。
+    """
+    if pd.isnull(val):
+        return 0.0
+    val = float(val)
+    if 0 < val <= 1.0:
+        return val * 100.0
+    return val
+
 
 def fetch_shares_count(ticker):
     """【重い処理】発行済株式数のみを取得（30日毎にのみ実行）"""
@@ -85,6 +121,7 @@ def fetch_shares_count(ticker):
 
     return shares
 
+
 def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
     """
     単一Tickerから最新株価を取得。
@@ -92,7 +129,7 @@ def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
-        
+
         # 1. 【軽量】最新株価の取得 (5日分)
         hist = ticker.history(period="5d", auto_adjust=False)
         if hist.empty or "Close" not in hist.columns:
@@ -122,19 +159,16 @@ def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
     except Exception:
         return None, existing_shares, False, "YF_ERROR"
 
+
 def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
-    """
-    複数の市場サフィックス (.T, .F, .S, .FUK) を試行し、株価と株式数を取得する。
-    """
-    candidate_suffixes = [".T", ".F", ".S", ".FUK"]
-    
+    """国内市場(.T)から株価と株式数を取得する。取得できない銘柄は候補から外す。"""
     yf_logger = logging.getLogger("yfinance")
     prev_level = yf_logger.level
     yf_logger.setLevel(logging.CRITICAL)
 
     existing_shares = cached_info.get("shares") if cached_info else None
     shares_updated_at = cached_info.get("shares_updated_at", "") if cached_info else ""
-    
+
     is_shares_expired = True
     if shares_updated_at:
         try:
@@ -147,7 +181,7 @@ def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
     last_status = "NOT_FOUND"
 
     try:
-        for suffix in candidate_suffixes:
+        for suffix in CANDIDATE_SUFFIXES:
             ticker_symbol = f"{sec_code}{suffix}"
             price, shares, shares_refreshed, status = fetch_single_ticker(
                 ticker_symbol, existing_shares, is_shares_expired
@@ -156,11 +190,11 @@ def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
             if status == "SUCCESS":
                 market_cap = price * shares
                 shares_date = today_str if shares_refreshed or not shares_updated_at else shares_updated_at
-                
+
                 logger.info(f"SUCCESS: {sec_code} ({ticker_symbol}) - 株価:{price:.1f}円, "
                             f"株式数:{'再取得' if shares_refreshed else 'キャッシュ利用'}, "
                             f"時価総額:{market_cap/1e8:.2f}億円")
-                
+
                 return price, shares, market_cap, "SUCCESS", ticker_symbol, shares_date
 
             elif status == "NO_SHARES":
@@ -170,48 +204,56 @@ def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
             elif status == "YF_ERROR" and last_status not in ["NO_SHARES", "NO_PRICE"]:
                 last_status = "YF_ERROR"
 
-        logger.warning(f"DIAGNOSIS: {sec_code} -> {last_status} (試行市場全滅)")
+        logger.warning(f"DIAGNOSIS: {sec_code} -> {last_status}")
         return None, None, None, last_status, f"{sec_code}.T", shares_updated_at
 
     finally:
         yf_logger.setLevel(prev_level)
+
+
+def prepare_financials(financial_df):
+    """財務キャッシュの列名・単位を、以降の処理で使う形に正規化する"""
+
+    # 社名列の正規化：financial_cache.csv は filer_name で保存されている。
+    # これを company_name に写しておかないと、候補CSV・HTML・履歴から社名が消える。
+    if "company_name" not in financial_df.columns and "filer_name" in financial_df.columns:
+        financial_df["company_name"] = financial_df["filer_name"]
+    if "company_name" not in financial_df.columns:
+        financial_df["company_name"] = ""
+    financial_df["company_name"] = financial_df["company_name"].fillna("")
+
+    # 自己資本比率：無ければ純資産/総資産から計算し、単位は％に統一する
+    if "equity_ratio" not in financial_df.columns:
+        financial_df["equity_ratio"] = pd.NA
+
+    if "equity_value" in financial_df.columns and "total_assets" in financial_df.columns:
+        mask = (
+            financial_df["equity_ratio"].isnull()
+            & financial_df["equity_value"].notnull()
+            & financial_df["total_assets"].notnull()
+            & (financial_df["total_assets"] > 0)
+        )
+        financial_df.loc[mask, "equity_ratio"] = (
+            financial_df.loc[mask, "equity_value"] / financial_df.loc[mask, "total_assets"] * 100.0
+        )
+
+    financial_df["equity_ratio"] = financial_df["equity_ratio"].apply(to_percent)
+    return financial_df
+
 
 def run_pipeline(financial_df):
     """スクリーニングパイプライン実行"""
     today_str = datetime.now().strftime("%Y-%m-%d")
     stock_cache = load_stock_cache()
 
-    # --- 補正処理：自己資本比率(equity_ratio)の安全再計算＆正規化 ---
-    if "net_assets" in financial_df.columns and "total_assets" in financial_df.columns:
-        # 純資産と総資産が存在する場合、比率を計算
-        # ※ 0除算を防ぐため total_assets > 0 の条件を付与
-        mask = (pd.notnull(financial_df["net_assets"])) & (pd.notnull(financial_df["total_assets"])) & (financial_df["total_assets"] > 0)
-        
-        # 単純計算
-        financial_df.loc[mask, "equity_ratio"] = (financial_df.loc[mask, "net_assets"] / financial_df.loc[mask, "total_assets"]) * 100.0
-
-    # 【安全装置】単位違い（千円と円の混在等）で100%を超えてしまっている場合の補正
-    def normalize_equity_ratio(val):
-        if pd.isnull(val):
-            return 0.0
-        val = float(val)
-        # 100%を超える場合は、100以下になるまで10で割る（桁ズレの自動修正）
-        while val > 100.0:
-            val = val / 10.0
-        # 0.5 などの小数（比率）で入っている場合は 100倍する
-        if 0 < val <= 1.0:
-            val = val * 100.0
-        return val
-
-    if "equity_ratio" in financial_df.columns:
-        financial_df["equity_ratio"] = financial_df["equity_ratio"].apply(normalize_equity_ratio)
+    financial_df = prepare_financials(financial_df)
 
     # 1. 第1段階：一次財務スクリーニング (NCAV > 0 & 自己資本比率 >= 30%)
     financial_df["ncav"] = financial_df["current_assets"] - financial_df["total_liabilities"]
 
     stage1_df = financial_df[
-        (financial_df["ncav"] > 0) & 
-        (financial_df["equity_ratio"] >= 30.0)
+        (financial_df["ncav"] > 0) &
+        (financial_df["equity_ratio"] >= MIN_EQUITY_RATIO)
     ].copy()
 
     logger.info(f"【第1段階】総銘柄数: {len(financial_df)} -> 財務スクリーニング通過: {len(stage1_df)}銘柄")
@@ -224,13 +266,11 @@ def run_pipeline(financial_df):
         sec_code = str(row["sec_code"])
         cached_info = stock_cache.get(sec_code)
 
-        # 株価の取得
         price, shares, market_cap, status, ticker_symbol, shares_updated_at = diagnose_and_fetch_stock_data(
             sec_code, cached_info, today_str
         )
         status_counts[status] = status_counts.get(status, 0) + 1
 
-        # キャッシュの更新
         stock_cache[sec_code] = {
             "ticker": ticker_symbol,
             "price": price,
@@ -244,7 +284,7 @@ def run_pipeline(financial_df):
         # ネットネット判定 (NCAV / 時価総額 >= 1.0)
         if status == "SUCCESS" and market_cap and market_cap > 0:
             nc_ratio = row["ncav"] / market_cap
-            if nc_ratio >= 1.0:
+            if nc_ratio >= MIN_NC_RATIO:
                 item = row.to_dict()
                 item.update({
                     "ticker": ticker_symbol,
@@ -252,14 +292,19 @@ def run_pipeline(financial_df):
                     "shares": shares,
                     "market_cap": market_cap,
                     "nc_ratio": nc_ratio,
-                    "net_cash_ratio": (row.get("cash_and_equivalents", 0) - row.get("total_liabilities", 0)) / market_cap
                 })
+
+                # ネットキャッシュは現金の値が取れている銘柄だけ計算する
+                cash = safe_get(row, "cash_and_equivalents")
+                if cash is not None:
+                    net_cash = float(cash) - float(row["total_liabilities"])
+                    item["net_cash"] = net_cash
+                    item["net_cash_ratio"] = net_cash / market_cap
+
                 results.append(item)
 
-        # サーバー負荷軽減用ウェイト（0.2秒）
         time.sleep(0.2)
 
-    # 最新キャッシュの保存
     save_stock_cache(stock_cache)
 
     logger.info(f"【株価取得診断結果】 SUCCESS: {status_counts.get('SUCCESS', 0)}, "
@@ -267,16 +312,17 @@ def run_pipeline(financial_df):
                 f"NO_SHARES: {status_counts.get('NO_SHARES', 0)}, YF_ERROR: {status_counts.get('YF_ERROR', 0)}")
 
     candidates_df = pd.DataFrame(results)
-    logger.info(f"【第2段階】ネットネット基準クリア (NCAV/時価総額 >= 1.0): {len(candidates_df)}銘柄")
+    logger.info(f"【第2段階】ネットネット基準クリア (NCAV/時価総額 >= {MIN_NC_RATIO}): {len(candidates_df)}銘柄")
 
     # 3. 第3段階：出力
     if not candidates_df.empty:
         candidates_df = candidates_df.sort_values(by="nc_ratio", ascending=False)
 
         output_cols = [
-            "sec_code", "company_name", "ticker", "price", "market_cap", 
-            "ncav", "nc_ratio", "equity_ratio", "operating_income", 
-            "cash_and_equivalents", "current_assets", "total_liabilities"
+            "sec_code", "company_name", "ticker", "price", "market_cap",
+            "ncav", "nc_ratio", "equity_ratio", "cash_and_equivalents",
+            "net_cash", "net_cash_ratio", "current_assets", "total_liabilities",
+            "total_assets", "accounting_standard", "consolidated", "fiscal_period"
         ]
         available_cols = [c for c in output_cols if c in candidates_df.columns]
         summary_df = candidates_df[available_cols]
@@ -287,9 +333,10 @@ def run_pipeline(financial_df):
 
     return pd.DataFrame()
 
+
 if __name__ == "__main__":
     logger.info("--- スクリーナー実行開始 ---")
-    
+
     financial_file = "financial_cache.csv"
     if not os.path.exists(financial_file):
         logger.error(f"エラー: {financial_file} が見つかりません。先に財務キャッシュ生成を行ってください。")
@@ -298,9 +345,9 @@ if __name__ == "__main__":
     try:
         financial_df = pd.read_csv(financial_file, dtype={"sec_code": str})
         logger.info(f"{financial_file} 読み込み完了: {len(financial_df)}件")
-        
+
         run_pipeline(financial_df)
-        
+
     except Exception as e:
         logger.critical(f"スクリーナー処理中に致命的なエラーが発生しました: {e}", exc_info=True)
         sys.exit(1)
