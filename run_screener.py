@@ -33,6 +33,10 @@ MIN_NC_RATIO = 1.0        # NCAV / 時価総額
 # 財務データの許容誤差（端数・単位差を吸収するための係数）
 TOLERANCE = 1.05
 
+# yfinance へのリクエスト間隔（秒）。短すぎるとレート制限で連続失敗する。
+REQUEST_INTERVAL = 0.4
+RETRY_INTERVAL = 1.5
+
 
 def load_stock_cache():
     """株価・株式数・ステータスキャッシュの読み込み"""
@@ -175,6 +179,9 @@ def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
 
     existing_shares = cached_info.get("shares") if cached_info else None
     shares_updated_at = cached_info.get("shares_updated_at", "") if cached_info else ""
+    # 欠損が文字列 "nan" として保存されると日付解釈に失敗し、毎回重いAPIを叩くことになる
+    if shares_updated_at in (None, "nan", "NaT", "None"):
+        shares_updated_at = ""
 
     is_shares_expired = True
     if shares_updated_at:
@@ -264,15 +271,20 @@ def validate_financials(financial_df):
         & df["total_liabilities"].notnull() & (df["total_liabilities"] >= 0)
         & (df["current_assets"] <= df["total_assets"] * TOLERANCE)
         & (df["total_liabilities"] <= df["total_assets"] * TOLERANCE)
+        # 流動資産と総資産が1円単位で一致する行は、同じ数値を二重に拾っている疑いが濃い
+        # （固定資産が完全にゼロの上場企業は実質存在しない）
+        & (df["current_assets"] != df["total_assets"])
         & df["equity_ratio"].notnull()
         & (df["equity_ratio"] > 0)
         & (df["equity_ratio"] <= 100.0 * TOLERANCE)
     )
 
+    # 貸借対照表の恒等式チェック：純資産は「総資産 - 総負債」を超えられない。
+    # 非支配株主持分の分だけ小さくなるのは正常なので、上振れのみを弾く。
     if "equity_value" in df.columns:
         ok = ok & (
             df["equity_value"].isnull()
-            | (df["equity_value"] <= df["total_assets"] * TOLERANCE)
+            | (df["equity_value"] <= (df["total_assets"] - df["total_liabilities"]) * TOLERANCE)
         )
 
     valid_df = df[ok].copy()
@@ -326,15 +338,22 @@ def run_pipeline(financial_df):
     # 2. 第2段階：株価の毎日更新＆株式数の条件付き更新
     status_counts = {"SUCCESS": 0, "NOT_FOUND": 0, "NO_PRICE": 0, "NO_SHARES": 0, "YF_ERROR": 0}
     results = []
+    rows_by_code = {str(row["sec_code"]): row for _, row in stage1_df.iterrows()}
 
-    for _, row in stage1_df.iterrows():
-        sec_code = str(row["sec_code"])
+    def process(sec_code, row):
+        """1銘柄分の株価取得・キャッシュ更新・ネットネット判定。ステータスを返す。"""
         cached_info = stock_cache.get(sec_code)
 
         price, shares, market_cap, status, ticker_symbol, shares_updated_at = diagnose_and_fetch_stock_data(
             sec_code, cached_info, today_str
         )
-        status_counts[status] = status_counts.get(status, 0) + 1
+
+        # 取得失敗時に前回値を捨てると、翌日また重い株式数APIを叩くことになり
+        # レート制限の悪循環に陥る。直近の値を残しておく。
+        if status != "SUCCESS" and cached_info:
+            price = price if price is not None else cached_info.get("price")
+            shares = shares if shares is not None else cached_info.get("shares")
+            market_cap = market_cap if market_cap is not None else cached_info.get("market_cap")
 
         stock_cache[sec_code] = {
             "ticker": ticker_symbol,
@@ -368,7 +387,40 @@ def run_pipeline(financial_df):
 
                 results.append(item)
 
-        time.sleep(0.2)
+        return status
+
+    for sec_code, row in rows_by_code.items():
+        status = process(sec_code, row)
+        status_counts[status] = status_counts.get(status, 0) + 1
+        time.sleep(REQUEST_INTERVAL)
+
+    # 取得失敗の再試行。
+    # Yahoo側のレート制限にかかると失敗が連続して発生し、上場している銘柄まで
+    # NO_PRICE として落ちてしまうため、間隔を空けて一度だけやり直す。
+    retry_codes = [c for c in rows_by_code
+                   if stock_cache.get(c, {}).get("status") in ("NO_PRICE", "YF_ERROR", "NOT_FOUND")]
+
+    if retry_codes:
+        logger.info(f"↻ 取得失敗 {len(retry_codes)}銘柄を再試行します（間隔 {RETRY_INTERVAL}秒）")
+        time.sleep(5)
+        recovered = 0
+        for sec_code in retry_codes:
+            status = process(sec_code, rows_by_code[sec_code])
+            if status == "SUCCESS":
+                recovered += 1
+                status_counts["SUCCESS"] += 1
+                for key in ("NO_PRICE", "YF_ERROR", "NOT_FOUND"):
+                    if status_counts.get(key, 0) > 0:
+                        status_counts[key] -= 1
+                        break
+            time.sleep(RETRY_INTERVAL)
+        logger.info(f"↻ 再試行で {recovered}/{len(retry_codes)} 銘柄が回復しました")
+
+        if recovered > len(retry_codes) * 0.3:
+            logger.warning(
+                "⚠ 再試行で多数が回復しました。初回取得時にレート制限を受けている可能性があります。"
+                "REQUEST_INTERVAL を大きくすることを検討してください。"
+            )
 
     save_stock_cache(stock_cache)
 
