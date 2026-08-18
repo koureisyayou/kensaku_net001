@@ -78,6 +78,12 @@ jobs:
       - name: HTMLページ生成
         run: python generate_html.py
 
+      # 二次スクリーニング。JPXの取得失敗などで落ちても一次候補の公開は続けたいので
+      # continue-on-error を付ける（失敗時は前回の shortlist.html が残る）。
+      - name: 二次スクリーニングページ生成
+        continue-on-error: true
+        run: python generate_shortlist.py
+
       # 作業ツリーが汚れた状態では通常の pull --rebase は失敗するため autostash を付ける
       - name: リモートの最新差分を pull
         run: |
@@ -85,11 +91,11 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase --autostash origin main || true
 
-      - name: キャッシュ(CSV)、履歴データおよびindex.htmlをコミット・プッシュ
+      - name: キャッシュ(CSV)、履歴データおよびHTMLをコミット・プッシュ
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chrono: auto-update financial cache, screening history and index.html [skip ci]"
-          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv index.html'
+          commit_message: "chrono: auto-update financial cache, screening history and pages [skip ci]"
+          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv index.html shortlist.html'
 
       - name: ログファイルの保存 (Artifact)
         if: always()
