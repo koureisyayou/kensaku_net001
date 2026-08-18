@@ -3,14 +3,6 @@
 net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格指標付与済み）
 を読み、二次スクリーニング結果を shortlist.html に出力する。
 
-前提とする列（run_screener.py の output_cols に準拠）:
-    sec_code / company_name / ticker / price / market_cap / ncav / nc_ratio /
-    equity_ratio / fiscal_period
-    ＋ price_metrics.py が付与する 60日安値乖離% / 5日騰落% / 停滞日数 /
-      20日平均売買代金(百万円) など
-
-market_cap と ncav は円単位で入っているため、表示・判定では億円に換算する。
-
 除外する篩:
     1. 整理銘柄        上場廃止が決定済み
     2. 監理銘柄        EXCLUDE_KANRI で切替
@@ -20,13 +12,19 @@ market_cap と ncav は円単位で入っているため、表示・判定では
     6. 滞留            連続掲載 MAX_STREAK_DAYS 営業日超
 
 除外せず列・バッジで出すもの:
-    NCAV倍率が高すぎる銘柄／決算日からの経過日数／安値乖離・騰落率・停滞日数
+    NCAV倍率が高すぎる銘柄／決算日・提出日からの経過日数／
+    安値乖離・騰落率・停滞日数
+
+データの鮮度について:
+    決算日経過は bs_date（XBRLコンテキストの instant = 貸借対照表の基準日）を使う。
+    fiscal_period は EDINET の periodEnd で、会計年度末を指すため半期報告書では
+    未来日が入る。よって fiscal_period は「過去日のときだけ」代用する。
+    bs_date は新規取得分から順に埋まるので、当面は提出日経過が実用的な目安になる。
 """
 
 from __future__ import annotations
 
 import html
-import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -62,7 +60,9 @@ COLUMN_ALIASES = {
     "ncav": ["ncav", "NCAV"],
     "ratio": ["nc_ratio", "NCAV / 時価総額"],
     "equity": ["equity_ratio", "自己資本比率"],
-    "fiscal": ["fiscal_period", "決算日", "決算期", "基準日"],
+    "bs": ["bs_date"],
+    "fiscal": ["fiscal_period"],
+    "submit": ["submit_date"],
     "low60": ["60日安値乖離%"],
     "ret5": ["5日騰落%"],
     "stagnant": ["停滞日数"],
@@ -82,26 +82,6 @@ def to_number(series: pd.Series) -> pd.Series:
         series.astype(str).str.replace(",", "", regex=False).str.strip(),
         errors="coerce",
     )
-
-
-DATE_PATTERN = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})?")
-
-
-def parse_period_end(value) -> pd.Timestamp | pd.NaT:
-    """fiscal_period から期末日を取り出す。
-
-    '2025-04-01 - 2026-03-31' のような期間表記なら末尾の日付を、
-    '2026-03-31' 単体ならそれを、'2026年3月期' なら月末を返す。
-    """
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return pd.NaT
-    matches = DATE_PATTERN.findall(str(value))
-    if not matches:
-        return pd.NaT
-    year, month, day = matches[-1]
-    if day:
-        return pd.Timestamp(int(year), int(month), int(day))
-    return pd.Timestamp(int(year), int(month), 1) + pd.offsets.MonthEnd(0)
 
 
 # ----------------------------------------------------- 連続掲載日数の算出
@@ -147,9 +127,6 @@ def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int
 
     # 単位換算（円 → 億円）
     work["_時価総額億"] = to_number(work[resolve(work, "mcap")]) / OKU
-    ncav_col = resolve(work, "ncav")
-    if ncav_col:
-        work["_NCAV億"] = to_number(work[ncav_col]) / OKU
     work["_株価"] = to_number(work[resolve(work, "price")])
     work["_NCAV倍率"] = to_number(work[resolve(work, "ratio")])
     work["_自己資本比率"] = to_number(work[resolve(work, "equity")])
@@ -157,17 +134,30 @@ def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int
     # 連続掲載日数
     work["連続掲載日数"] = work[code_col].map(load_streaks(HISTORY_CSV, code_col))
 
-    # 決算日からの経過日数
+    # --- データの鮮度 ---
+    today = pd.Timestamp.now().normalize()
+
+    bs_col = resolve(work, "bs")
+    bs = pd.to_datetime(work[bs_col], errors="coerce") if bs_col else pd.Series(pd.NaT, index=work.index)
+
     fiscal_col = resolve(work, "fiscal")
     if fiscal_col:
-        period_end = work[fiscal_col].apply(parse_period_end)
-        work["決算日経過"] = (pd.Timestamp.now().normalize() - period_end).dt.days
-        if work["決算日経過"].isna().all():
-            print(f"[shortlist] {fiscal_col} から期末日を読み取れませんでした。値の例: {work[fiscal_col].dropna().head(3).tolist()}")
-    else:
-        work["決算日経過"] = pd.NA
+        # periodEnd は会計年度末。半期報告書では未来日になるので過去日だけ代用する。
+        fallback = pd.to_datetime(work[fiscal_col], errors="coerce")
+        bs = bs.fillna(fallback.where(fallback <= today))
+    work["決算日経過"] = (today - bs).dt.days
 
-    # JPX 監理・整理銘柄の突合
+    submit_col = resolve(work, "submit")
+    if submit_col:
+        submitted = pd.to_datetime(work[submit_col], errors="coerce")
+        work["提出日経過"] = (today - submitted).dt.days
+    else:
+        work["提出日経過"] = pd.NA
+
+    if work["決算日経過"].isna().all():
+        print("[shortlist] 決算日経過を算出できませんでした。bs_date がまだキャッシュに入っていない可能性があります。")
+
+    # --- JPX 監理・整理銘柄の突合 ---
     alerts = fetch_alerts()
     alert_map = dict(zip(alerts["コード"].astype(str).str.strip(), alerts["区分"])) if not alerts.empty else {}
     work["JPX指定"] = work[code_col].map(alert_map)
@@ -211,7 +201,7 @@ CSS = """
 body{margin:0;background:var(--paper);color:var(--ink);
   font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,system-ui,sans-serif;
   font-size:14px;line-height:1.6}
-.wrap{max-width:1240px;margin:0 auto;padding:32px 20px 64px}
+.wrap{max-width:1320px;margin:0 auto;padding:32px 20px 64px}
 header{border-bottom:2px solid var(--ink);padding-bottom:16px}
 h1{font-size:22px;letter-spacing:.08em;margin:0 0 4px;font-weight:700}
 .sub{color:var(--muted);font-size:12px;letter-spacing:.04em}
@@ -293,6 +283,7 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
         ("NCAV倍率", "_NCAV倍率", "{:,.2f}", False),
         ("自己資本比率", "_自己資本比率", "{:,.1f}", False),
         ("決算日経過", "決算日経過", "{:,.0f}", False),
+        ("提出日経過", "提出日経過", "{:,.0f}", False),
         ("60日安値乖離%", resolve(df, "low60"), "{:,.1f}", True),
         ("5日騰落%", resolve(df, "ret5"), "{:,.1f}", True),
         ("停滞日数", resolve(df, "stagnant"), "{:,.0f}", False),
@@ -318,7 +309,12 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
         ]
         for label, col, fmt, signed in cols:
             value = row.get(col)
-            extra = "stale" if label == "決算日経過" and pd.notna(value) and float(value) >= STALE_DATA_DAYS else ""
+            extra = ""
+            if label in ("決算日経過", "提出日経過") and pd.notna(value) and value != "":
+                try:
+                    extra = "stale" if float(value) >= STALE_DATA_DAYS else ""
+                except (TypeError, ValueError):
+                    extra = ""
             tds.append(cell(value, fmt, signed, extra))
         rows.append("<tr>" + "".join(tds) + "</tr>")
 
@@ -370,7 +366,11 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
     </table>
   </div>
 
-  <footer>決算日経過が長い銘柄は、期末以降の構造変化がNCAVに反映されていない可能性があります。数値は自動取得したもので正確性を保証しません。</footer>
+  <footer>
+    決算日経過は貸借対照表の基準日からの日数です。空欄の銘柄は基準日が未取得で、提出日経過を目安にしてください。
+    経過が長い銘柄は、期末以降の構造変化がNCAVに反映されていない可能性があります。
+    数値は自動取得したもので正確性を保証しません。
+  </footer>
 </div>
 <script>{JS}</script>
 </body>
