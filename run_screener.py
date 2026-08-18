@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
+from price_metrics import add_price_metrics
 
 # ログ設定：ファイルと標準出力（GitHub Actionsコンソール）の両方に出力
 logging.basicConfig(
@@ -64,7 +65,14 @@ def load_stock_cache():
 
 
 def save_stock_cache(cache):
-    """株価・株式数・ステータスキャッシュの保存"""
+    """
+    株価・株式数・ステータスキャッシュの保存。
+
+    ※ ここで add_price_metrics を呼んではいけない。
+      このキャッシュは第1段階を通過した全銘柄（数百〜千件）を含むため、
+      日足の一括取得が重すぎるうえ、価格指標が必要なのは最終候補だけである。
+      指標の付与は run_pipeline の出力直前で行う。
+    """
     rows = []
     for sec_code, data in cache.items():
         rows.append({
@@ -442,7 +450,16 @@ def run_pipeline(financial_df):
             "total_assets", "accounting_standard", "consolidated", "fiscal_period"
         ]
         available_cols = [c for c in output_cols if c in candidates_df.columns]
-        summary_df = candidates_df[available_cols]
+        summary_df = candidates_df[available_cols].copy()
+
+        # 価格指標（安値乖離・騰落率・停滞日数・売買代金）を列として付与する。
+        # 最終候補に対してのみ日足を取得するので、ここが正しい呼び出し位置。
+        # 失敗してもスクリーニング自体は成立させたいので握りつぶす。
+        try:
+            summary_df = add_price_metrics(summary_df, ticker_col="ticker")
+            logger.info("価格指標の列を付与しました。")
+        except Exception as e:
+            logger.warning(f"価格指標の付与に失敗しました（列なしで続行します）: {e}")
 
         summary_df.to_csv("net_net_candidates.csv", index=False, encoding="utf-8-sig")
         logger.info("ネットネット候補銘柄一覧を net_net_candidates.csv に出力しました。")
