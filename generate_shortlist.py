@@ -1,25 +1,32 @@
 """generate_shortlist.py
 
-net_net_candidates.csv（price_metrics.py で価格指標を付与済み）を読み、
-二次スクリーニング結果を shortlist.html に出力する。
+net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格指標付与済み）
+を読み、二次スクリーニング結果を shortlist.html に出力する。
 
-除外する篩（上から順に適用）:
-    1. 整理銘柄        上場廃止が決定済み。最優先で落とす
-    2. 監理銘柄        上場廃止のおそれ。EXCLUDE_KANRI で切替可
-    3. 株価下限        MIN_PRICE 円未満を除外
-    4. 時価総額下限    MIN_MCAP_OKU 億円未満を除外
-    5. 流動性          20日平均売買代金 MIN_TURNOVER_MYEN 百万円未満を除外
-    6. 滞留            連続掲載 MAX_STREAK_DAYS 営業日超を除外
+前提とする列（run_screener.py の output_cols に準拠）:
+    sec_code / company_name / ticker / price / market_cap / ncav / nc_ratio /
+    equity_ratio / fiscal_period
+    ＋ price_metrics.py が付与する 60日安値乖離% / 5日騰落% / 停滞日数 /
+      20日平均売買代金(百万円) など
 
-除外せずフラグ・列で出すもの:
-    - NCAV倍率が RATIO_FLAG_ABOVE 超  →「要確認」バッジ（良すぎる数字は疑う）
-    - 決算日からの経過日数            → データの鮮度
-    - 安値乖離 / 騰落率 / 停滞日数     → 並べ替え用の列
+market_cap と ncav は円単位で入っているため、表示・判定では億円に換算する。
+
+除外する篩:
+    1. 整理銘柄        上場廃止が決定済み
+    2. 監理銘柄        EXCLUDE_KANRI で切替
+    3. 株価下限        MIN_PRICE 円未満
+    4. 時価総額下限    MIN_MCAP_OKU 億円未満
+    5. 流動性          MIN_TURNOVER_MYEN 百万円未満
+    6. 滞留            連続掲載 MAX_STREAK_DAYS 営業日超
+
+除外せず列・バッジで出すもの:
+    NCAV倍率が高すぎる銘柄／決算日からの経過日数／安値乖離・騰落率・停滞日数
 """
 
 from __future__ import annotations
 
 import html
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -34,29 +41,32 @@ CANDIDATES_CSV = Path("net_net_candidates.csv")
 HISTORY_CSV = Path("screening_history.csv")
 OUTPUT_HTML = Path("shortlist.html")
 
-EXCLUDE_KANRI = True          # 監理銘柄も除外するか（整理銘柄は常に除外）
-MIN_PRICE = 50.0              # 株価の下限（円）
-MIN_MCAP_OKU = 5.0            # 時価総額の下限（億円）
-MIN_TURNOVER_MYEN = 5.0       # 20日平均売買代金の下限（百万円）
-MAX_STREAK_DAYS = 250         # 連続掲載日数の上限
-RATIO_FLAG_ABOVE = 5.0        # NCAV倍率がこれを超えたら「要確認」バッジ
-STALE_DATA_DAYS = 120         # 決算日からこれ以上経っていたら経過日数を強調
-NEW_ENTRY_DAYS = 5            # 連続掲載日数がこれ以下なら「新規」バッジ
+EXCLUDE_KANRI = True
+MIN_PRICE = 50.0            # 円
+MIN_MCAP_OKU = 5.0          # 億円
+MIN_TURNOVER_MYEN = 5.0     # 百万円
+MAX_STREAK_DAYS = 250       # 営業日
+RATIO_FLAG_ABOVE = 5.0      # NCAV倍率がこれ超で「要確認」
+STALE_DATA_DAYS = 120       # 決算日経過がこれ以上で強調
+NEW_ENTRY_DAYS = 5          # 連続掲載日数がこれ以下で「新規」
 
+OKU = 1e8                   # 円 → 億円
 JST = ZoneInfo("Asia/Tokyo")
 
+# 列名ゆれの吸収（左が本命 = run_screener.py の出力名）
 COLUMN_ALIASES = {
-    "code": ["コード", "code", "Code", "証券コード"],
-    "name": ["銘柄名", "name", "Name", "会社名"],
-    "price": ["株価 (円)", "株価", "price", "Price"],
-    "mcap": ["時価総額 (億円)", "時価総額", "market_cap"],
-    "ratio": ["NCAV / 時価総額", "NCAV/時価総額", "ncav_ratio"],
-    "equity": ["自己資本比率", "equity_ratio"],
+    "code": ["sec_code", "コード", "code"],
+    "name": ["company_name", "filer_name", "銘柄名"],
+    "price": ["price", "株価"],
+    "mcap": ["market_cap", "時価総額"],
+    "ncav": ["ncav", "NCAV"],
+    "ratio": ["nc_ratio", "NCAV / 時価総額"],
+    "equity": ["equity_ratio", "自己資本比率"],
+    "fiscal": ["fiscal_period", "決算日", "決算期", "基準日"],
     "low60": ["60日安値乖離%"],
     "ret5": ["5日騰落%"],
     "stagnant": ["停滞日数"],
     "turnover": ["20日平均売買代金(百万円)"],
-    "fiscal": ["決算日", "決算期", "基準日", "会計期間末", "period_end", "fiscal_end"],
 }
 
 
@@ -68,27 +78,44 @@ def resolve(df: pd.DataFrame, key: str) -> str | None:
 
 
 def to_number(series: pd.Series) -> pd.Series:
-    """「2.92 倍」「75.2%」「1,145.0」のような表記を数値にする。"""
     return pd.to_numeric(
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("倍", "", regex=False)
-        .str.replace("%", "", regex=False)
-        .str.strip(),
+        series.astype(str).str.replace(",", "", regex=False).str.strip(),
         errors="coerce",
     )
+
+
+DATE_PATTERN = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})?")
+
+
+def parse_period_end(value) -> pd.Timestamp | pd.NaT:
+    """fiscal_period から期末日を取り出す。
+
+    '2025-04-01 - 2026-03-31' のような期間表記なら末尾の日付を、
+    '2026-03-31' 単体ならそれを、'2026年3月期' なら月末を返す。
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return pd.NaT
+    matches = DATE_PATTERN.findall(str(value))
+    if not matches:
+        return pd.NaT
+    year, month, day = matches[-1]
+    if day:
+        return pd.Timestamp(int(year), int(month), int(day))
+    return pd.Timestamp(int(year), int(month), 1) + pd.offsets.MonthEnd(0)
 
 
 # ----------------------------------------------------- 連続掲載日数の算出
 
 def load_streaks(path: Path, code_col_hint: str) -> dict[str, int]:
     if not path.exists():
+        print(f"[shortlist] {path} が無いため連続掲載日数は算出しません。")
         return {}
 
     hist = pd.read_csv(path, dtype=str)
-    date_col = next((c for c in ["日付", "date", "Date", "更新日", "実行日"] if c in hist.columns), None)
-    code_col = next((c for c in [code_col_hint, "コード", "code", "Code"] if c and c in hist.columns), None)
+    date_col = next((c for c in ["日付", "date", "Date", "更新日", "実行日", "run_date"] if c in hist.columns), None)
+    code_col = next((c for c in [code_col_hint, "sec_code", "コード", "code"] if c and c in hist.columns), None)
     if date_col is None or code_col is None:
+        print(f"[shortlist] {path} の日付列またはコード列を特定できませんでした: {list(hist.columns)}")
         return {}
 
     hist[date_col] = pd.to_datetime(hist[date_col], errors="coerce").dt.date
@@ -97,10 +124,10 @@ def load_streaks(path: Path, code_col_hint: str) -> dict[str, int]:
         return {}
 
     run_dates = sorted(hist[date_col].unique(), reverse=True)
-    by_date = {d: set(hist.loc[hist[date_col] == d, code_col]) for d in run_dates}
+    by_date = {d: set(hist.loc[hist[date_col] == d, code_col].astype(str)) for d in run_dates}
 
     streaks: dict[str, int] = {}
-    for code in set(hist[code_col]):
+    for code in set(hist[code_col].astype(str)):
         count = 0
         for d in run_dates:
             if code in by_date[d]:
@@ -114,54 +141,60 @@ def load_streaks(path: Path, code_col_hint: str) -> dict[str, int]:
 # ------------------------------------------------------------- 絞り込み
 
 def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int]], pd.DataFrame]:
-    code_col = resolve(df, "code")
+    code_col, name_col = resolve(df, "code"), resolve(df, "name")
     work = df.copy()
     work[code_col] = work[code_col].astype(str).str.strip()
 
+    # 単位換算（円 → 億円）
+    work["_時価総額億"] = to_number(work[resolve(work, "mcap")]) / OKU
+    ncav_col = resolve(work, "ncav")
+    if ncav_col:
+        work["_NCAV億"] = to_number(work[ncav_col]) / OKU
+    work["_株価"] = to_number(work[resolve(work, "price")])
+    work["_NCAV倍率"] = to_number(work[resolve(work, "ratio")])
+    work["_自己資本比率"] = to_number(work[resolve(work, "equity")])
+
     # 連続掲載日数
-    streaks = load_streaks(HISTORY_CSV, code_col)
-    work["連続掲載日数"] = work[code_col].map(streaks)
+    work["連続掲載日数"] = work[code_col].map(load_streaks(HISTORY_CSV, code_col))
 
     # 決算日からの経過日数
     fiscal_col = resolve(work, "fiscal")
     if fiscal_col:
-        fiscal = pd.to_datetime(work[fiscal_col], errors="coerce")
-        work["決算日経過"] = (pd.Timestamp.now(tz=None).normalize() - fiscal).dt.days
+        period_end = work[fiscal_col].apply(parse_period_end)
+        work["決算日経過"] = (pd.Timestamp.now().normalize() - period_end).dt.days
+        if work["決算日経過"].isna().all():
+            print(f"[shortlist] {fiscal_col} から期末日を読み取れませんでした。値の例: {work[fiscal_col].dropna().head(3).tolist()}")
     else:
-        work["決算日経過"] = None
-        print("[shortlist] 決算日の列が見つかりません。run_screener.py 側で決算日を出力すると鮮度が見えます。")
+        work["決算日経過"] = pd.NA
 
     # JPX 監理・整理銘柄の突合
     alerts = fetch_alerts()
     alert_map = dict(zip(alerts["コード"].astype(str).str.strip(), alerts["区分"])) if not alerts.empty else {}
     work["JPX指定"] = work[code_col].map(alert_map)
-
-    flagged = work[work["JPX指定"].notna()][[code_col, resolve(work, "name"), "JPX指定"]].copy()
+    flagged = work.loc[work["JPX指定"].notna(), [code_col, name_col, "JPX指定"]].copy()
 
     stages: list[tuple[str, int]] = [("一次候補", len(work))]
 
     def drop(mask: pd.Series, label: str) -> None:
         nonlocal work
-        removed = int(mask.sum())
-        work = work[~mask]
+        removed = int(mask.fillna(False).sum())
+        work = work[~mask.fillna(False)]
         stages.append((label, -removed))
 
     drop(work["JPX指定"] == "整理", "整理銘柄")
     if EXCLUDE_KANRI:
         drop(work["JPX指定"] == "監理", "監理銘柄")
-
-    price = to_number(work[resolve(work, "price")])
-    drop(price < MIN_PRICE, f"株価{MIN_PRICE:.0f}円未満")
-
-    mcap = to_number(work[resolve(work, "mcap")])
-    drop(mcap < MIN_MCAP_OKU, f"時価総額{MIN_MCAP_OKU:.0f}億未満")
+    drop(work["_株価"] < MIN_PRICE, f"株価{MIN_PRICE:.0f}円未満")
+    drop(work["_時価総額億"] < MIN_MCAP_OKU, f"時価総額{MIN_MCAP_OKU:.0f}億未満")
 
     turnover_col = resolve(work, "turnover")
     if turnover_col:
         drop(to_number(work[turnover_col]).fillna(0) < MIN_TURNOVER_MYEN, "流動性不足")
+    else:
+        print("[shortlist] 売買代金の列がありません。run_screener.py 側で add_price_metrics を呼べていますか。")
 
     streak = work["連続掲載日数"]
-    drop((streak.notna()) & (streak > MAX_STREAK_DAYS), f"連続掲載{MAX_STREAK_DAYS}日超")
+    drop(streak.notna() & (streak > MAX_STREAK_DAYS), f"連続掲載{MAX_STREAK_DAYS}日超")
 
     stages.append(("残り", len(work)))
     return work, stages, flagged
@@ -171,51 +204,51 @@ def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int
 
 CSS = """
 :root {
-  --paper: #eceef1; --card: #fbfbfc; --ink: #14171c; --muted: #6b7280;
-  --rule: #d3d7dd; --indigo: #1b4d7a; --amber: #a86a12; --moss: #3f6b4a; --alert: #96302c;
+  --paper:#eceef1; --card:#fbfbfc; --ink:#14171c; --muted:#6b7280;
+  --rule:#d3d7dd; --indigo:#1b4d7a; --amber:#a86a12; --moss:#3f6b4a; --alert:#96302c;
 }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--paper); color: var(--ink);
-  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, sans-serif;
-  font-size: 14px; line-height: 1.6; }
-.wrap { max-width: 1240px; margin: 0 auto; padding: 32px 20px 64px; }
-header { border-bottom: 2px solid var(--ink); padding-bottom: 16px; }
-h1 { font-size: 22px; letter-spacing: .08em; margin: 0 0 4px; font-weight: 700; }
-.sub { color: var(--muted); font-size: 12px; letter-spacing: .04em; }
-.sub a { color: var(--indigo); }
-.funnel { display: flex; flex-wrap: wrap; margin: 24px 0 8px; border: 1px solid var(--rule); background: var(--card); }
-.funnel div { flex: 1 1 120px; padding: 12px 14px; border-right: 1px solid var(--rule); }
-.funnel div:last-child { border-right: 0; background: #f2f5f8; }
-.funnel .label { font-size: 11px; color: var(--muted); letter-spacing: .04em; }
-.funnel .num { font-family: ui-monospace, Menlo, monospace; font-size: 22px;
-  font-variant-numeric: tabular-nums; line-height: 1.2; }
-.funnel .num.minus { color: var(--amber); }
-.funnel .num.keep { color: var(--indigo); }
-.rule-note { font-size: 12px; color: var(--muted); margin: 0 0 20px; }
-.alertbox { border-left: 4px solid var(--alert); background: #fbf3f2; padding: 12px 16px; margin: 0 0 24px; font-size: 13px; }
-.alertbox h2 { font-size: 13px; margin: 0 0 6px; letter-spacing: .04em; }
-.alertbox code { font-family: ui-monospace, Menlo, monospace; }
-.scroll { overflow-x: auto; border: 1px solid var(--rule); background: var(--card); }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid #e6e9ed; }
-th:nth-child(1), th:nth-child(2), td:nth-child(1), td:nth-child(2) { text-align: left; }
-thead th { position: sticky; top: 0; background: var(--ink); color: #fff; font-size: 11px;
-  font-weight: 600; letter-spacing: .04em; cursor: pointer; user-select: none; }
-thead th:hover { background: var(--indigo); }
-thead th::after { content: " ↕"; opacity: .35; }
-thead th.asc::after { content: " ↑"; opacity: 1; }
-thead th.desc::after { content: " ↓"; opacity: 1; }
-tbody tr:nth-child(even) { background: #f5f6f8; }
-tbody tr:hover { background: #e8eef4; }
-td.num { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
-td.stale { color: var(--alert); font-weight: 600; }
-.badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 2px;
-  font-size: 10px; letter-spacing: .04em; color: #fff; }
-.badge.new { background: var(--moss); }
-.badge.check { background: var(--amber); }
-.pos { color: var(--amber); } .neg { color: var(--indigo); }
-footer { margin-top: 20px; font-size: 11px; color: var(--muted); }
-@media (max-width: 600px) { .wrap { padding: 20px 12px 48px; } .funnel .num { font-size: 18px; } }
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,system-ui,sans-serif;
+  font-size:14px;line-height:1.6}
+.wrap{max-width:1240px;margin:0 auto;padding:32px 20px 64px}
+header{border-bottom:2px solid var(--ink);padding-bottom:16px}
+h1{font-size:22px;letter-spacing:.08em;margin:0 0 4px;font-weight:700}
+.sub{color:var(--muted);font-size:12px;letter-spacing:.04em}
+.sub a{color:var(--indigo)}
+.funnel{display:flex;flex-wrap:wrap;margin:24px 0 8px;border:1px solid var(--rule);background:var(--card)}
+.funnel div{flex:1 1 110px;padding:12px 14px;border-right:1px solid var(--rule)}
+.funnel div:last-child{border-right:0;background:#f2f5f8}
+.funnel .label{font-size:11px;color:var(--muted);letter-spacing:.04em}
+.funnel .num{font-family:ui-monospace,Menlo,monospace;font-size:22px;
+  font-variant-numeric:tabular-nums;line-height:1.2}
+.funnel .num.minus{color:var(--amber)}
+.funnel .num.keep{color:var(--indigo)}
+.rule-note{font-size:12px;color:var(--muted);margin:0 0 20px}
+.alertbox{border-left:4px solid var(--alert);background:#fbf3f2;padding:12px 16px;margin:0 0 24px;font-size:13px}
+.alertbox h2{font-size:13px;margin:0 0 6px;letter-spacing:.04em}
+.alertbox code{font-family:ui-monospace,Menlo,monospace}
+.scroll{overflow-x:auto;border:1px solid var(--rule);background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:8px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #e6e9ed}
+th:nth-child(1),th:nth-child(2),td:nth-child(1),td:nth-child(2){text-align:left}
+thead th{position:sticky;top:0;background:var(--ink);color:#fff;font-size:11px;
+  font-weight:600;letter-spacing:.04em;cursor:pointer;user-select:none}
+thead th:hover{background:var(--indigo)}
+thead th::after{content:" ↕";opacity:.35}
+thead th.asc::after{content:" ↑";opacity:1}
+thead th.desc::after{content:" ↓";opacity:1}
+tbody tr:nth-child(even){background:#f5f6f8}
+tbody tr:hover{background:#e8eef4}
+td.num{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+td.stale{color:var(--alert);font-weight:600}
+.badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:2px;
+  font-size:10px;letter-spacing:.04em;color:#fff}
+.badge.new{background:var(--moss)}
+.badge.check{background:var(--amber)}
+.pos{color:var(--amber)}.neg{color:var(--indigo)}
+footer{margin-top:20px;font-size:11px;color:var(--muted)}
+@media(max-width:600px){.wrap{padding:20px 12px 48px}.funnel .num{font-size:18px}}
 """
 
 JS = """
@@ -237,80 +270,74 @@ document.querySelectorAll('thead th').forEach((th, idx) => {
 """
 
 
-def cell(value, signed=False, extra_class="") -> str:
-    if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
+def cell(value, fmt="{:,.1f}", signed=False, extra_class="") -> str:
+    if value is None or value == "" or (not isinstance(value, str) and pd.isna(value)):
         return '<td class="num">–</td>'
-    raw = html.escape(str(value))
-    text, cls = raw, f"num {extra_class}".strip()
-    if signed:
-        try:
-            v = float(value)
+    cls = f"num {extra_class}".strip()
+    try:
+        v = float(value)
+        text = f"{v:+.1f}" if signed else fmt.format(v)
+        if signed:
             cls += " pos" if v > 0 else " neg" if v < 0 else ""
-            text = f"{v:+.1f}"
-        except (TypeError, ValueError):
-            pass
-    return f'<td class="{cls}" data-sort="{raw}">{text}</td>'
+        return f'<td class="{cls}" data-sort="{v}">{text}</td>'
+    except (TypeError, ValueError):
+        raw = html.escape(str(value))
+        return f'<td class="{cls}" data-sort="{raw}">{raw}</td>'
 
 
 def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFrame) -> str:
+    code_col, name_col = resolve(df, "code"), resolve(df, "name")
     cols = [
-        ("コード", resolve(df, "code"), False),
-        ("銘柄名", resolve(df, "name"), False),
-        ("株価", resolve(df, "price"), False),
-        ("時価総額(億)", resolve(df, "mcap"), False),
-        ("NCAV倍率", resolve(df, "ratio"), False),
-        ("自己資本比率", resolve(df, "equity"), False),
-        ("決算日経過", "決算日経過", False),
-        ("60日安値乖離%", resolve(df, "low60"), True),
-        ("5日騰落%", resolve(df, "ret5"), True),
-        ("停滞日数", resolve(df, "stagnant"), False),
-        ("売買代金(百万)", resolve(df, "turnover"), False),
-        ("連続掲載日数", "連続掲載日数", False),
+        ("株価", "_株価", "{:,.0f}", False),
+        ("時価総額(億)", "_時価総額億", "{:,.1f}", False),
+        ("NCAV倍率", "_NCAV倍率", "{:,.2f}", False),
+        ("自己資本比率", "_自己資本比率", "{:,.1f}", False),
+        ("決算日経過", "決算日経過", "{:,.0f}", False),
+        ("60日安値乖離%", resolve(df, "low60"), "{:,.1f}", True),
+        ("5日騰落%", resolve(df, "ret5"), "{:,.1f}", True),
+        ("停滞日数", resolve(df, "stagnant"), "{:,.0f}", False),
+        ("売買代金(百万)", resolve(df, "turnover"), "{:,.1f}", False),
+        ("連続掲載日数", "連続掲載日数", "{:,.0f}", False),
     ]
     cols = [c for c in cols if c[1] is not None]
-    head = "".join(f"<th>{html.escape(label)}</th>" for label, *_ in cols)
+    head = "<th>コード</th><th>銘柄名</th>" + "".join(f"<th>{html.escape(l)}</th>" for l, *_ in cols)
 
-    ratio_col = resolve(df, "ratio")
     rows = []
     for _, row in df.iterrows():
-        tds = []
-        for label, col, signed in cols:
+        badges = ""
+        streak = row.get("連続掲載日数")
+        if pd.notna(streak) and streak <= NEW_ENTRY_DAYS:
+            badges += '<span class="badge new">新規</span>'
+        ratio = row.get("_NCAV倍率")
+        if pd.notna(ratio) and ratio > RATIO_FLAG_ABOVE:
+            badges += '<span class="badge check">要確認</span>'
+
+        tds = [
+            f'<td>{html.escape(str(row[code_col]))}</td>',
+            f'<td>{html.escape(str(row[name_col]))}{badges}</td>',
+        ]
+        for label, col, fmt, signed in cols:
             value = row.get(col)
-            if label == "銘柄名":
-                badges = ""
-                streak = row.get("連続掲載日数")
-                if pd.notna(streak) and streak <= NEW_ENTRY_DAYS:
-                    badges += '<span class="badge new">新規</span>'
-                ratio = to_number(pd.Series([row.get(ratio_col)])).iloc[0] if ratio_col else None
-                if pd.notna(ratio) and ratio > RATIO_FLAG_ABOVE:
-                    badges += '<span class="badge check">要確認</span>'
-                tds.append(f"<td>{html.escape(str(value))}{badges}</td>")
-            elif label == "決算日経過":
-                stale = "stale" if pd.notna(value) and value and float(value) >= STALE_DATA_DAYS else ""
-                tds.append(cell(value, extra_class=stale))
-            else:
-                tds.append(cell(value, signed))
+            extra = "stale" if label == "決算日経過" and pd.notna(value) and float(value) >= STALE_DATA_DAYS else ""
+            tds.append(cell(value, fmt, signed, extra))
         rows.append("<tr>" + "".join(tds) + "</tr>")
 
-    funnel = "".join(
-        f'<div><div class="label">{html.escape(label)}</div>'
-        f'<div class="num {"minus" if n < 0 else "keep" if label == "残り" else ""}">'
-        f'{n:+d}</div></div>'.replace(f">{n:+d}<", f">{n}<") if label in ("一次候補", "残り")
-        else f'<div><div class="label">{html.escape(label)}</div>'
-             f'<div class="num minus">{n:+d}</div></div>'
-        for label, n in stages
-    )
+    funnel = ""
+    for label, n in stages:
+        cls = "keep" if label in ("一次候補", "残り") else "minus"
+        text = f"{n}" if label in ("一次候補", "残り") else f"{n:+d}"
+        funnel += (f'<div><div class="label">{html.escape(label)}</div>'
+                   f'<div class="num {cls}">{text}</div></div>')
 
     alert_html = ""
     if not flagged.empty:
         items = "、".join(
-            f'<code>{html.escape(str(r.iloc[0]))}</code> {html.escape(str(r.iloc[1]))}（{html.escape(str(r.iloc[2]))}）'
+            f'<code>{html.escape(str(r.iloc[0]))}</code> {html.escape(str(r.iloc[1]))}'
+            f'（{html.escape(str(r.iloc[2]))}銘柄）'
             for _, r in flagged.iterrows()
         )
-        alert_html = (
-            '<div class="alertbox"><h2>JPXが監理・整理銘柄に指定している銘柄が一次候補に含まれています</h2>'
-            f'{items}</div>'
-        )
+        alert_html = ('<div class="alertbox"><h2>一次候補にJPXの監理・整理銘柄が含まれています</h2>'
+                      f'{items}</div>')
 
     updated = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
     return f"""<!DOCTYPE html>
@@ -343,7 +370,7 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
     </table>
   </div>
 
-  <footer>決算日経過が長い銘柄は、決算期末以降の構造変化がNCAVに反映されていない可能性があります。数値は自動取得したもので正確性を保証しません。</footer>
+  <footer>決算日経過が長い銘柄は、期末以降の構造変化がNCAVに反映されていない可能性があります。数値は自動取得したもので正確性を保証しません。</footer>
 </div>
 <script>{JS}</script>
 </body>
@@ -352,7 +379,7 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
 
 
 def main() -> None:
-    df = pd.read_csv(CANDIDATES_CSV)
+    df = pd.read_csv(CANDIDATES_CSV, dtype={"sec_code": str})
     shortlist, stages, flagged = build_shortlist(df)
     OUTPUT_HTML.write_text(render(shortlist, stages, flagged), encoding="utf-8")
     print(" → ".join(f"{label} {n}" for label, n in stages))
