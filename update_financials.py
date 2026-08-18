@@ -117,6 +117,9 @@ def get_submitted_documents(date_str):
                     "doc_type": doc_type,
                     "submit_date": date_str,
                     "submit_datetime": doc.get("submitDateTime") or f"{date_str} 00:00",
+                    # ※ EDINET の periodEnd は「会計年度の期末日」であって
+                    #   貸借対照表の基準日ではない。半期報告書では未来の日付が入る。
+                    #   BSの基準日は XBRL のコンテキスト instant から拾う（bs_date）。
                     "period_end": doc.get("periodEnd") or ""
                 })
 
@@ -185,8 +188,12 @@ def build_context_ranks(soup):
       2: 当期・個別（NonConsolidatedMember のみ・CurrentYear）
       3: 当期・個別（上記以外）
     前期(Prior)・提出日時点(FilingDate)・セグメント等の内訳は採用しない。
+
+    あわせて、各コンテキストの instant 日付も返す。これが貸借対照表の基準日で、
+    EDINET の periodEnd（会計年度末）とは異なる。半期報告書では両者がずれる。
     """
     ranks = {}
+    instants = {}
     has_nonconsolidated = False
 
     for ctx in soup.find_all(["context", "xbrli:context"]):
@@ -198,7 +205,8 @@ def build_context_ranks(soup):
         if "NonConsolidated" in ctx_id:
             has_nonconsolidated = True
 
-        if not ctx.find(["instant", "xbrli:instant"]):
+        instant_el = ctx.find(["instant", "xbrli:instant"])
+        if not instant_el:
             continue  # 期間(duration)コンテキストは残高科目に使わない
         if "Prior" in ctx_id or "FilingDate" in ctx_id:
             continue
@@ -212,7 +220,10 @@ def build_context_ranks(soup):
             ranks[ctx_id] = 2 if is_current_year else 3
         # それ以外（セグメント別・株式種類別などの内訳）は採用しない
 
-    return ranks, has_nonconsolidated
+        if ctx_id in ranks:
+            instants[ctx_id] = (instant_el.text or "").strip()
+
+    return ranks, instants, has_nonconsolidated
 
 
 def fetch_xbrl_data(doc_id, sec_code):
@@ -239,36 +250,40 @@ def fetch_xbrl_data(doc_id, sec_code):
 
             with z.open(xbrl_filename) as f:
                 soup = BeautifulSoup(f.read(), "lxml-xml")
-                ctx_ranks, has_nonconsolidated = build_context_ranks(soup)
+                ctx_ranks, ctx_instants, has_nonconsolidated = build_context_ranks(soup)
 
                 if not ctx_ranks:
                     soup.decompose()
                     return None
 
                 def get_tag_value(tag_names):
-                    """優先順位が最も高いコンテキストの値を返す -> (値, rank, タグ名)"""
+                    """優先順位が最も高いコンテキストの値 -> (値, rank, タグ名, コンテキストID)"""
                     for tag in tag_names:
                         best = None
                         for el in soup.find_all(lambda e: e.name == tag):
-                            rank = ctx_ranks.get(el.get("contextRef") or "")
+                            ctx_id = el.get("contextRef") or ""
+                            rank = ctx_ranks.get(ctx_id)
                             if rank is None:
                                 continue
                             val = parse_clean_amount(el)
                             if val is None:
                                 continue
                             if best is None or rank < best[0]:
-                                best = (rank, val)
+                                best = (rank, val, ctx_id)
                                 if rank == 0:
                                     break
                         if best is not None:
-                            return best[1], best[0], tag
-                    return None, None, None
+                            return best[1], best[0], tag, best[2]
+                    return None, None, None, None
 
-                ca_val, ca_rank, ca_tag = get_tag_value(TAGS_CURRENT_ASSETS)
-                tl_val, _, tl_tag = get_tag_value(TAGS_TOTAL_LIABILITIES)
-                ta_val, _, ta_tag = get_tag_value(TAGS_TOTAL_ASSETS)
-                eq_val, _, eq_tag = get_tag_value(TAGS_EQUITY)
-                cash_val, _, _ = get_tag_value(TAGS_CASH)
+                ca_val, ca_rank, ca_tag, ca_ctx = get_tag_value(TAGS_CURRENT_ASSETS)
+                tl_val, _, tl_tag, _ = get_tag_value(TAGS_TOTAL_LIABILITIES)
+                ta_val, _, ta_tag, ta_ctx = get_tag_value(TAGS_TOTAL_ASSETS)
+                eq_val, _, eq_tag, _ = get_tag_value(TAGS_EQUITY)
+                cash_val, _, _, _ = get_tag_value(TAGS_CASH)
+
+                # 貸借対照表の基準日。流動資産を採ったコンテキストを第一候補にする。
+                bs_date = ctx_instants.get(ca_ctx) or ctx_instants.get(ta_ctx) or ""
 
                 used_tags = [t for t in (ca_tag, tl_tag, ta_tag, eq_tag) if t]
                 accounting_std = "IFRS" if any(t.endswith("IFRS") for t in used_tags) else "J-GAAP"
@@ -308,7 +323,8 @@ def fetch_xbrl_data(doc_id, sec_code):
                     "equity_ratio": equity_ratio,
                     "cash_and_equivalents": cash_val,
                     "consolidated": consolidated,
-                    "accounting_standard": accounting_std
+                    "accounting_standard": accounting_std,
+                    "bs_date": bs_date
                 }
 
     except Exception as e:
@@ -332,7 +348,7 @@ def main():
         "sec_code", "filer_name", "current_assets", "total_liabilities",
         "total_assets", "equity_value", "equity_type", "equity_ratio",
         "cash_and_equivalents", "doc_id", "submit_date", "doc_type",
-        "accounting_standard", "consolidated", "fiscal_period"
+        "accounting_standard", "consolidated", "fiscal_period", "bs_date"
     ]
 
     DTYPE_SPEC = {
@@ -345,6 +361,7 @@ def main():
         "accounting_standard": "string",
         "consolidated": "string",
         "fiscal_period": "string",
+        "bs_date": "string",
     }
 
     NUMERIC_COLS = [
@@ -371,7 +388,7 @@ def main():
     else:
         df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
 
-    # 新設列（cash_and_equivalents など）が無い旧キャッシュへの追随
+    # 新設列（cash_and_equivalents, bs_date など）が無い旧キャッシュへの追随
     for col in columns:
         if col != "sec_code" and col not in df_cache.columns:
             df_cache[col] = pd.NA
@@ -436,7 +453,8 @@ def main():
                     "doc_type": doc["doc_type"],
                     "accounting_standard": fin["accounting_standard"],
                     "consolidated": "連結" if fin["consolidated"] else "個別",
-                    "fiscal_period": doc["period_end"]
+                    "fiscal_period": doc["period_end"],
+                    "bs_date": fin["bs_date"]
                 }
                 cached_doc_ids.add(doc_id)
                 success_count += 1
