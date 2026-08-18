@@ -306,7 +306,8 @@ def validate_financials(financial_df):
     # 「pathspec did not match any files」で失敗するため。
     cols = [c for c in ["sec_code", "filer_name", "company_name", "current_assets",
                         "total_liabilities", "total_assets", "equity_value",
-                        "equity_ratio", "doc_id", "fiscal_period"] if c in df.columns]
+                        "equity_ratio", "doc_id", "fiscal_period", "bs_date",
+                        "submit_date"] if c in df.columns]
     invalid_df[cols].to_csv(INVALID_FILE, index=False, encoding="utf-8-sig")
 
     if not invalid_df.empty:
@@ -447,7 +448,12 @@ def run_pipeline(financial_df):
             "sec_code", "company_name", "ticker", "price", "market_cap",
             "ncav", "nc_ratio", "equity_ratio", "cash_and_equivalents",
             "net_cash", "net_cash_ratio", "current_assets", "total_liabilities",
-            "total_assets", "accounting_standard", "consolidated", "fiscal_period"
+            "total_assets", "accounting_standard", "consolidated", "fiscal_period",
+            # bs_date は貸借対照表の基準日（XBRLコンテキストの instant）。
+            # fiscal_period は EDINET の periodEnd（会計年度末）で、半期報告書では
+            # 未来日になるため、データの鮮度判定には bs_date を使う。
+            # submit_date は既存キャッシュにも入っているので、bs_date が揃うまでの代用。
+            "bs_date", "submit_date"
         ]
         available_cols = [c for c in output_cols if c in candidates_df.columns]
         summary_df = candidates_df[available_cols].copy()
