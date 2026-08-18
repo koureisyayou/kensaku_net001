@@ -72,6 +72,44 @@ jobs:
       - name: スクリーニング実行
         run: python run_screener.py
 
+      # ------------------------------------------------------------------
+      # リモートへの追従。
+      #
+      # ここまでで生成したファイルは毎回ゼロから作り直されるものなので、
+      # リモートとの差分をマージする意味がない。マージを試みると rebase が
+      # 衝突して pipeline 全体が止まるため、リモートの最新に合わせたうえで
+      # 今回の生成物を上書きする方式にしている。
+      #
+      # ただし screening_history.csv だけは例外で、日々の結果を積み上げる
+      # 唯一の累積ファイル。これを上書きするとジョブ開始後に他の実行が
+      # push した分を消してしまうため、退避対象から外してリモート側を採用する。
+      # 今日の分はこの直後の save_history.py が追記するので取りこぼさない。
+      # ------------------------------------------------------------------
+      - name: リモートの最新状態に追従（生成物は今回の結果を採用）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 中断中の rebase / merge が残っていれば片付ける
+          git rebase --abort 2>/dev/null || true
+          git merge --abort 2>/dev/null || true
+
+          # 毎回作り直される生成物のみ退避（累積ファイルは含めない）
+          mkdir -p /tmp/artifacts
+          for f in financial_cache.csv processed_docs.csv stock_cache.csv \
+                   net_net_candidates.csv invalid_financials.csv; do
+            if [ -f "$f" ]; then cp "$f" /tmp/artifacts/; fi
+          done
+
+          git fetch origin main
+          git reset --hard origin/main
+          cp -f /tmp/artifacts/* . 2>/dev/null || true
+
+          echo "--- 追従後の履歴ファイル ---"
+          wc -l screening_history.csv 2>/dev/null || echo "screening_history.csv なし"
+
+      # 履歴の追記はリモート最新を取り込んだ後に行う。
+      # 同日同銘柄は save_history.py 側で重複排除される。
       - name: 履歴データの追記保存
         run: python save_history.py
 
@@ -83,13 +121,6 @@ jobs:
       - name: 二次スクリーニングページ生成
         continue-on-error: true
         run: python generate_shortlist.py
-
-      # 作業ツリーが汚れた状態では通常の pull --rebase は失敗するため autostash を付ける
-      - name: リモートの最新差分を pull
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase --autostash origin main || true
 
       - name: キャッシュ(CSV)、履歴データおよびHTMLをコミット・プッシュ
         uses: stefanzweifel/git-auto-commit-action@v5
