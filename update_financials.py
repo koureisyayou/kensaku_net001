@@ -469,7 +469,13 @@ def main():
     logger.info(f"解析完了 - 新規取得: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
 
     df_new = df_new.reset_index()
-    if not df_cache.reset_index().equals(df_new):
+
+    # 中身が同じでも、列構成が変わっていれば書き出す。
+    # 新設列（bs_date など）を追加した直後に新規取得が0件だと、
+    # equals() が真になって列の追加が永久にファイルへ反映されないため。
+    df_old = df_cache.reset_index()
+    schema_changed = list(df_old.columns) != list(df_new.columns)
+    if not os.path.exists(CACHE_FILE) or schema_changed or not df_old.equals(df_new):
         df_new.to_csv(CACHE_FILE, index=False, encoding="utf-8-sig")
         logger.info(f"🎉 財務キャッシュ ({CACHE_FILE}) を更新しました。")
 
