@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Net-Net Stock Screener - 地方市場版（名証）</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 20px; background: #f8f9fa; color: #333; }
+        h1 { color: #1a252f; border-bottom: 2px solid #7b3f00; padding-bottom: 10px; }
+        .meta { margin-bottom: 16px; color: #666; font-size: 0.9em; }
+        .nav a { color: #2c3e50; text-decoration: none; border: 1px solid #ccc; padding: 6px 12px; border-radius: 4px; background: #fff; font-size: 0.9em; }
+        .nav { margin-bottom: 16px; }
+        .caution { background: #fff8e6; border: 1px solid #e0c068; border-left: 6px solid #b8860b; padding: 14px 18px; margin-bottom: 20px; border-radius: 4px; }
+        .caution h2 { margin: 0 0 10px; font-size: 1.05em; color: #7b3f00; }
+        .caution ul { margin: 0; padding-left: 20px; }
+        .caution li { margin-bottom: 10px; font-size: 0.9em; line-height: 1.6; }
+        .warmup { background: #eef4fb; border: 1px solid #b7cbe4; padding: 10px 14px; margin-bottom: 16px; border-radius: 4px; font-size: 0.9em; }
+        .wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #ddd; white-space: nowrap; }
+        th { background: #5a4632; color: #fff; position: sticky; top: 0; }
+        tr:hover { background: #f5f2ed; }
+        .num { text-align: right; font-family: monospace; }
+        .highlight { font-weight: bold; color: #27ae60; }
+        .warn { color: #c0392b; font-weight: bold; }
+        .badge { background: #c0392b; color: #fff; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; }
+        footer { margin-top: 24px; color: #888; font-size: 0.8em; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <h1>Net-Net Stock Screener｜地方市場版（名証）</h1>
+    <div class="nav"><a href="index.html">&larr; 東証版に戻る</a></div>
+    <div class="meta">
+        掲載件数: <strong>56</strong> 銘柄 |
+        相場日: 2026-08-20 |
+        ページ更新: 2026-08-21 08:18 (JST) | 非表示: 261 銘柄（期間内に約定なし）
+    </div>
+
+    <div class="caution">
+        <h2>このページの数字を読む前に</h2>
+        <ul>
+            <li><strong>流動性が東証とは2桁違います</strong><br>名証単独上場銘柄は1日の売買代金が数十万円程度のことも珍しくありません。画面上の株価で売買が成立する保証はなく、数百株の注文で値が飛ぶ場合があります。</li>
+            <li><strong>約定のない銘柄は掲載していません</strong><br>集計期間内に一度も売買が成立していない銘柄は、気配値しか存在しないため非表示にしています。名証の上場銘柄の大半は東証との重複上場で、名証では売買が成立しません。</li>
+            <li><strong>株価は「最後に約定した終値」です</strong><br>気配値は採用していません。経過営業日が大きい銘柄は、その価格が現在の実勢から離れている可能性があります。</li>
+            <li><strong>売買不成立の日が常態です</strong><br>約定日数が20日中1〜2日という銘柄が多数あります。約定日数の少ない銘柄ほど、平均売買代金もNCAV倍率も参考程度に見てください。</li>
+            <li><strong>監理・整理銘柄を含みます</strong><br>名証の相場表に監理・整理の区画がある銘柄にはフラグを立てています。上場廃止に向かう銘柄はネットネット指標が良く見えがちです。</li>
+            <li><strong>財務データは決算日時点のものです</strong><br>決算後の増資・大型投資・業績悪化は反映されていません。候補はあくまで一次抽出であり、投資判断の前に必ず有価証券報告書を確認してください。</li>
+        </ul>
+    </div>
+<div class="warmup">⚠ 流動性の集計に使えた営業日は <strong>1日</strong> です（本来は20営業日）。蓄積が進むまで、約定日数と平均売買代金は過小評価になります。</div>
+<div class="warmup">NCAV判定前の流動性データを表示しています（発行済株式数の取得が未実装のため）。</div>
+
+    <div class="wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>コード</th>
+                <th>銘柄名</th>
+                <th>市場</th>
+                <th class="num">株価 (円)</th>
+                <th>約定日</th>
+                <th class="num">経過営業日</th>
+                <th class="num">約定日数/20</th>
+                <th class="num">平均売買代金</th>
+                <th>フラグ</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>6623</strong></td>
+                <td>愛知電</td>
+                <td>プレミア市場</td>
+                <td class="num">8,910.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">8,910 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7485</strong></td>
+                <td>岡谷鋼機</td>
+                <td>プレミア市場</td>
+                <td class="num">5,090.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">3,003 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3260</strong></td>
+                <td>エスポア</td>
+                <td>監理銘柄</td>
+                <td class="num">668.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">1,536 万円</td>
+                <td><span class="badge">監理・整理</span></td>
+            </tr>
+            <tr>
+                <td><strong>9357</strong></td>
+                <td>名港海</td>
+                <td>メイン市場</td>
+                <td class="num">2,460.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">836 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9402</strong></td>
+                <td>中日放送</td>
+                <td>プレミア市場</td>
+                <td class="num">1,195.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">741 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>6565</strong></td>
+                <td>ＡＢホテル</td>
+                <td>メイン市場</td>
+                <td class="num">1,310.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">655 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7488</strong></td>
+                <td>ヤガミ</td>
+                <td>メイン市場</td>
+                <td class="num">5,100.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">612 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>8190</strong></td>
+                <td>ヤマナカ</td>
+                <td>メイン市場</td>
+                <td class="num">517.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">558 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9664</strong></td>
+                <td>御園座</td>
+                <td>メイン市場</td>
+                <td class="num">1,501.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">525 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5607</strong></td>
+                <td>中央可鍛</td>
+                <td>メイン市場</td>
+                <td class="num">601.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">427 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>1777</strong></td>
+                <td>川崎設備</td>
+                <td>メイン市場</td>
+                <td class="num">2,344.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">375 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3032</strong></td>
+                <td>ゴルフ・ドゥ</td>
+                <td>ネクスト市場</td>
+                <td class="num">247.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">366 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7076</strong></td>
+                <td>名南Ｍ＆Ａ</td>
+                <td>メイン市場</td>
+                <td class="num">1,037.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">353 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>377A</strong></td>
+                <td>エージェントＩＧＨＤ</td>
+                <td>メイン市場</td>
+                <td class="num">1,066.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">341 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>418A</strong></td>
+                <td>ウリドキ</td>
+                <td>ネクスト市場</td>
+                <td class="num">1,284.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">334 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>1869</strong></td>
+                <td>名工建</td>
+                <td>メイン市場</td>
+                <td class="num">1,903.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">324 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3739</strong></td>
+                <td>コムシード</td>
+                <td>ネクスト市場</td>
+                <td class="num">120.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">295 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7227</strong></td>
+                <td>アスカ</td>
+                <td>メイン市場</td>
+                <td class="num">1,850.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">278 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9471</strong></td>
+                <td>文渓堂</td>
+                <td>メイン市場</td>
+                <td class="num">1,149.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">276 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9359</strong></td>
+                <td>伊勢湾海</td>
+                <td>メイン市場</td>
+                <td class="num">954.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">229 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9643</strong></td>
+                <td>中日興</td>
+                <td>メイン市場</td>
+                <td class="num">11,080.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">222 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7870</strong></td>
+                <td>福島印</td>
+                <td>メイン市場</td>
+                <td class="num">371.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">204 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3504</strong></td>
+                <td>丸八ホールディングス</td>
+                <td>メイン市場</td>
+                <td class="num">1,411.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">198 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3775</strong></td>
+                <td>ガイアックス</td>
+                <td>ネクスト市場</td>
+                <td class="num">450.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">194 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>6142</strong></td>
+                <td>富士精工</td>
+                <td>メイン市場</td>
+                <td class="num">1,735.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">174 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>2467</strong></td>
+                <td>ＶＬＣセキュリティ</td>
+                <td>ネクスト市場</td>
+                <td class="num">179.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">170 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5075</strong></td>
+                <td>アップコン</td>
+                <td>ネクスト市場</td>
+                <td class="num">1,037.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">156 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>2902</strong></td>
+                <td>太陽化</td>
+                <td>メイン市場</td>
+                <td class="num">2,673.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">134 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9040</strong></td>
+                <td>大宝運</td>
+                <td>メイン市場</td>
+                <td class="num">4,215.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">126 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>8145</strong></td>
+                <td>中部水</td>
+                <td>メイン市場</td>
+                <td class="num">3,155.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">126 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7118</strong></td>
+                <td>伸和ホールディングス</td>
+                <td>ネクスト市場</td>
+                <td class="num">4,100.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">123 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5530</strong></td>
+                <td>日本システムバンク</td>
+                <td>メイン市場</td>
+                <td class="num">1,090.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">120 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3066</strong></td>
+                <td>ＪＢイレブン</td>
+                <td>メイン市場</td>
+                <td class="num">632.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">114 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>8228</strong></td>
+                <td>マルイチ産商</td>
+                <td>メイン市場</td>
+                <td class="num">1,113.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">111 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5343</strong></td>
+                <td>ニッコー</td>
+                <td>メイン市場</td>
+                <td class="num">185.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">102 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3808</strong></td>
+                <td>オーケーウェブ</td>
+                <td>ネクスト市場</td>
+                <td class="num">29.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">69 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>8316</strong></td>
+                <td>三井住友</td>
+                <td>プレミア市場</td>
+                <td class="num">6,667.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">67 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>4063</strong></td>
+                <td>信越化</td>
+                <td>プレミア市場</td>
+                <td class="num">6,114.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">61 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9170</strong></td>
+                <td>成友興業</td>
+                <td>メイン市場</td>
+                <td class="num">1,900.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">57 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>259A</strong></td>
+                <td>ケイ・ウノ</td>
+                <td>ネクスト市場</td>
+                <td class="num">1,720.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">52 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5979</strong></td>
+                <td>カネソウ</td>
+                <td>メイン市場</td>
+                <td class="num">5,090.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">51 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>6111</strong></td>
+                <td>旭精機</td>
+                <td>メイン市場</td>
+                <td class="num">2,017.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">40 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3419</strong></td>
+                <td>アートグリーン</td>
+                <td>ネクスト市場</td>
+                <td class="num">1,978.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">40 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>2551</strong></td>
+                <td>マルサンアイ</td>
+                <td>メイン市場</td>
+                <td class="num">3,575.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">36 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9956</strong></td>
+                <td>バローＨＤ</td>
+                <td>プレミア市場</td>
+                <td class="num">3,210.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">32 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>6655</strong></td>
+                <td>洋電機</td>
+                <td>メイン市場</td>
+                <td class="num">789.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">32 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>7790</strong></td>
+                <td>バルコス</td>
+                <td>ネクスト市場</td>
+                <td class="num">1,042.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">31 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>8071</strong></td>
+                <td>東海エレ</td>
+                <td>メイン市場</td>
+                <td class="num">2,968.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">30 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>275A</strong></td>
+                <td>ハンワホームズ</td>
+                <td>ネクスト市場</td>
+                <td class="num">386.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">23 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>9914</strong></td>
+                <td>植松商会</td>
+                <td>メイン市場</td>
+                <td class="num">732.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">22 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3346</strong></td>
+                <td>ヒロタグループＨＤ</td>
+                <td>ネクスト市場</td>
+                <td class="num">83.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">17 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>6439</strong></td>
+                <td>中日鋳工</td>
+                <td>メイン市場</td>
+                <td class="num">395.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">8 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5241</strong></td>
+                <td>日本オーエー研究所</td>
+                <td>メイン市場</td>
+                <td class="num">773.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">8 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>3384</strong></td>
+                <td>アークコア</td>
+                <td>ネクスト市場</td>
+                <td class="num">762.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">8 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>1738</strong></td>
+                <td>ＮＩＴＴＯＨ</td>
+                <td>メイン市場</td>
+                <td class="num">577.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">6 万円</td>
+                <td></td>
+            </tr>
+            <tr>
+                <td><strong>5386</strong></td>
+                <td>鶴弥</td>
+                <td>メイン市場</td>
+                <td class="num">381.0</td>
+                <td>2026-08-20</td>
+                <td class="num">0</td>
+                <td class="num">1</td>
+                <td class="num">4 万円</td>
+                <td></td>
+            </tr>
+        </tbody>
+    </table>
+    </div>
+
+    <footer>
+        株価・売買高の出所: 名古屋証券取引所「株式相場表（速報）」<br>
+        財務データの出所: 金融庁 EDINET<br>
+        本ページは個人が自動生成しているものであり、投資勧誘を目的としたものではありません。掲載内容の正確性は保証されません。
+    </footer>
+</body>
+</html>
