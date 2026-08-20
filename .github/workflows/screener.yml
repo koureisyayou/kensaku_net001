@@ -80,10 +80,9 @@ jobs:
       # 衝突して pipeline 全体が止まるため、リモートの最新に合わせたうえで
       # 今回の生成物を上書きする方式にしている。
       #
-      # ただし screening_history.csv だけは例外で、日々の結果を積み上げる
-      # 唯一の累積ファイル。これを上書きするとジョブ開始後に他の実行が
-      # push した分を消してしまうため、退避対象から外してリモート側を採用する。
-      # 今日の分はこの直後の save_history.py が追記するので取りこぼさない。
+      # 累積ファイル（screening_history.csv / local_price_history.csv）は
+      # 退避対象から外してリモート側を採用する。これらへ追記する処理は、
+      # このステップより後に置くこと。前で実行すると reset で消える。
       # ------------------------------------------------------------------
       - name: リモートの最新状態に追従（生成物は今回の結果を採用）
         run: |
@@ -105,16 +104,28 @@ jobs:
           git reset --hard origin/main
           cp -f /tmp/artifacts/* . 2>/dev/null || true
 
-          echo "--- 追従後の履歴ファイル ---"
+          echo "--- 追従後の累積ファイル ---"
           wc -l screening_history.csv 2>/dev/null || echo "screening_history.csv なし"
+          wc -l local_price_history.csv 2>/dev/null || echo "local_price_history.csv なし"
 
       # 履歴の追記はリモート最新を取り込んだ後に行う。
       # 同日同銘柄は save_history.py 側で重複排除される。
       - name: 履歴データの追記保存
         run: python save_history.py
 
+      # 名証の相場表PDFを取得し local_price_history.csv に追記する。
+      # これも累積ファイルなので、必ずリモート追従より後に実行する。
+      # 地方版は本体のおまけなので、失敗しても pipeline は止めない。
+      - name: 名証の株価取得
+        continue-on-error: true
+        run: python fetch_local_prices.py
+
       - name: HTMLページ生成
         run: python generate_html.py
+
+      - name: 地方版ページ生成
+        continue-on-error: true
+        run: python generate_local_html.py
 
       # 二次スクリーニング。JPXの取得失敗などで落ちても一次候補の公開は続けたいので
       # continue-on-error を付ける（失敗時は前回の shortlist.html が残る）。
@@ -126,7 +137,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chrono: auto-update financial cache, screening history and pages [skip ci]"
-          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv index.html shortlist.html'
+          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv local_price_history.csv local_prices.csv index.html shortlist.html local.html'
 
       - name: ログファイルの保存 (Artifact)
         if: always()
