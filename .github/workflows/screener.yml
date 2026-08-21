@@ -141,7 +141,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chrono: auto-update financial cache, screening history and pages [skip ci]"
-          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv local_price_history.csv local_prices.csv index.html shortlist.html local.html'
+          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv local_price_history.csv local_prices.csv CONTEXT.md index.html shortlist.html local.html'
 
       - name: ログファイルの保存 (Artifact)
         if: always()
