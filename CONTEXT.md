@@ -3,8 +3,8 @@
 このファイルは `make_context.py` が自動生成します。手で編集しないでください。
 相談時はこれ一枚を渡し、必要なスクリプト本体は指名して別途渡します。
 
-- 生成: 2026-08-22 01:03 JST
-- コミット: `9fe8b7c` (main) / 2026-08-21 19:49
+- 生成: 2026-08-22 03:13 JST
+- コミット: `be9e934` (main) / 2026-08-22 02:43
 
 ## いまの状態
 
@@ -19,25 +19,25 @@
 
 | ファイル | 行数 | sha1 | 更新 | 概要 |
 | --- | ---: | --- | --- | --- |
-| update_financials.py | 659 | `332f0e93` | 2026-08-22 00:22 |  |
-| financials.py | 155 | `7d573865` | 2026-08-22 00:22 | financial_cache.csv の読み込み・正規化・妥当性チェック。 |
-| run_screener.py | 380 | `a218ab8d` | 2026-08-22 00:22 |  |
-| run_screener_local.py | 250 | `0b005c9c` | 2026-08-22 00:22 | 地方単独上場（現状は名証）のネットネット候補を抽出し、 |
-| price_metrics.py | 127 | `26228d2b` | 2026-08-22 00:22 | ネットネットスクリーナー用の価格指標を計算して列として追加するモジュール。 |
-| save_history.py | 159 | `7fd7268b` | 2026-08-22 00:22 |  |
-| jpx_alerts.py | 138 | `c1e4138c` | 2026-08-22 00:22 | JPX が公開している監理・整理銘柄一覧を取得し、DataFrame で返す。 |
-| fetch_jpx_listed.py | 232 | `646ee2d2` | 2026-08-22 00:22 | JPX が公開している「東証上場銘柄一覧」(data_j.xls) を取得し、 |
-| fetch_local_prices.py | 464 | `c030648d` | 2026-08-22 00:22 | 名証（名古屋証券取引所）の株式相場表PDFから株価・売買高を抽出する。 |
-| generate_html.py | 133 | `4b7dee36` | 2026-08-22 00:22 | 社名を取り出す。 |
-| generate_local_html.py | 249 | `61df2e74` | 2026-08-22 00:22 | 地方市場（名証）版ネットネット候補ページの生成。 |
-| generate_shortlist.py | 404 | `b133449f` | 2026-08-22 00:22 | net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格指標付与済み） |
-| make_context.py | 286 | `2898f857` | 2026-08-22 00:22 | リポジトリの現状を CONTEXT.md 一枚にまとめる。 |
+| update_financials.py | 659 | `332f0e93` | 2026-08-22 02:43 |  |
+| financials.py | 155 | `7d573865` | 2026-08-22 02:43 | financial_cache.csv の読み込み・正規化・妥当性チェック。 |
+| run_screener.py | 380 | `a218ab8d` | 2026-08-22 02:43 |  |
+| run_screener_local.py | 250 | `0b005c9c` | 2026-08-22 02:43 | 地方単独上場（現状は名証）のネットネット候補を抽出し、 |
+| price_metrics.py | 127 | `26228d2b` | 2026-08-22 02:43 | ネットネットスクリーナー用の価格指標を計算して列として追加するモジュール。 |
+| save_history.py | 159 | `7fd7268b` | 2026-08-22 02:43 |  |
+| jpx_alerts.py | 138 | `c1e4138c` | 2026-08-22 02:43 | JPX が公開している監理・整理銘柄一覧を取得し、DataFrame で返す。 |
+| fetch_jpx_listed.py | 232 | `646ee2d2` | 2026-08-22 02:43 | JPX が公開している「東証上場銘柄一覧」(data_j.xls) を取得し、 |
+| fetch_local_prices.py | 464 | `62247852` | 2026-08-22 02:43 | 名証（名古屋証券取引所）の株式相場表PDFから株価・売買高を抽出する。 |
+| generate_html.py | 133 | `4b7dee36` | 2026-08-22 02:43 | 社名を取り出す。 |
+| generate_local_html.py | 249 | `61df2e74` | 2026-08-22 02:43 | 地方市場（名証）版ネットネット候補ページの生成。 |
+| generate_shortlist.py | 404 | `b133449f` | 2026-08-22 02:43 | net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格指標付与済み） |
+| make_context.py | 286 | `2898f857` | 2026-08-22 02:43 | リポジトリの現状を CONTEXT.md 一枚にまとめる。 |
 
 ## データファイル
 
 ### financial_cache.csv
 
-- 行数: 3,776 / 列数: 19 / 更新: 2026-08-22 01:02
+- 行数: 3,776 / 列数: 19 / 更新: 2026-08-22 03:13
 - 列: `sec_code`, `filer_name`, `current_assets`, `total_liabilities`, `total_assets`, `equity_value`, `equity_type`, `equity_ratio`, `cash_and_equivalents`, `doc_id`, `submit_date`, `doc_type`, `accounting_standard`, `consolidated`, `fiscal_period`, `bs_date`, `shares_outstanding`, `shares_as_of`, `shares_source`
 
 ```
@@ -48,7 +48,7 @@ sec_code    filer_name current_assets total_liabilities total_assets equity_valu
 
 ### stock_cache.csv
 
-- 行数: 2,964 / 列数: 8 / 更新: 2026-08-22 01:02
+- 行数: 2,964 / 列数: 8 / 更新: 2026-08-22 03:13
 - 列: `sec_code`, `ticker`, `price`, `shares`, `market_cap`, `status`, `updated_at`, `shares_updated_at`
 
 ```
@@ -59,7 +59,7 @@ sec_code ticker  price    shares    market_cap  status updated_at shares_updated
 
 ### net_net_candidates.csv
 
-- 行数: 142 / 列数: 29 / 更新: 2026-08-22 01:02
+- 行数: 142 / 列数: 29 / 更新: 2026-08-22 03:13
 - 列: `sec_code`, `company_name`, `ticker`, `price`, `market_cap`, `ncav`, `nc_ratio`, `equity_ratio`, `cash_and_equivalents`, `net_cash`, `net_cash_ratio`, `current_assets`, `total_liabilities`, `total_assets`, `accounting_standard`, `consolidated`, `fiscal_period`, `bs_date`, `submit_date`, `調整後終値`, `前日比%`, `5日騰落%`, `20日騰落%`, `60日安値乖離%`, `120日安値乖離%`, `52週安値乖離%`, `52週高値乖離%`, `停滞日数`, `20日平均売買代金(百万円)`
 - ⚠ 全行が空の列: `bs_date`
 
@@ -75,7 +75,7 @@ sec_code    company_name ticker price   market_cap        ncav           nc_rati
 
 ### screening_history.csv
 
-- 行数: 717 / 列数: 14 / 更新: 2026-08-22 01:02
+- 行数: 717 / 列数: 14 / 更新: 2026-08-22 03:13
 - 列: `date`, `sec_code`, `company_name`, `price`, `market_cap`, `ncav`, `ncav_ratio`, `cash_and_equivalents`, `net_cash`, `net_cash_ratio`, `operating_income`, `operating_cf`, `equity_ratio`, `rank`
 - ⚠ 全行が空の列: `operating_income`, `operating_cf`
 
@@ -87,7 +87,7 @@ sec_code    company_name ticker price   market_cap        ncav           nc_rati
 
 ### invalid_financials.csv
 
-- 行数: 124 / 列数: 12 / 更新: 2026-08-22 01:02
+- 行数: 124 / 列数: 12 / 更新: 2026-08-22 03:13
 - 列: `sec_code`, `filer_name`, `company_name`, `current_assets`, `total_liabilities`, `total_assets`, `equity_value`, `equity_ratio`, `doc_id`, `fiscal_period`, `bs_date`, `submit_date`
 - ⚠ 全行が空の列: `bs_date`
 
@@ -103,18 +103,18 @@ sec_code  filer_name company_name current_assets total_liabilities total_assets 
 
 ### processed_docs.csv
 
-- 行数: 3,800 / 列数: 1 / 更新: 2026-08-22 01:02
+- 行数: 3,800 / 列数: 1 / 更新: 2026-08-22 03:13
 - 列: `doc_id`
 
 ```
   doc_id
-S100YJF6
-S100YGBS
+S100YV0F
+S100YEID
 ```
 
 ### jpx_alerts_cache.csv
 
-- 行数: 116 / 列数: 4 / 更新: 2026-08-22 01:03
+- 行数: 116 / 列数: 4 / 更新: 2026-08-22 03:13
 - 列: `コード`, `銘柄名`, `指定年月日`, `区分`
 
 ```
@@ -129,9 +129,8 @@ S100YGBS
 
 ### local_price_history.csv
 
-- 行数: 633 / 列数: 12 / 更新: 2026-08-22 01:02
+- 行数: 634 / 列数: 12 / 更新: 2026-08-22 03:13
 - 列: `date`, `sec_code`, `name`, `market`, `sector`, `alert_section`, `is_supervised`, `close`, `last_quote`, `volume_k`, `traded`, `turnover`
-- ⚠ 全行が空の列: `alert_section`
 
 ```
       date sec_code     name market sector alert_section is_supervised close last_quote volume_k traded turnover
@@ -141,9 +140,8 @@ S100YGBS
 
 ### local_prices.csv
 
-- 行数: 317 / 列数: 15 / 更新: 2026-08-22 01:02
+- 行数: 317 / 列数: 15 / 更新: 2026-08-22 03:13
 - 列: `sec_code`, `name`, `market`, `sector`, `alert_section`, `is_supervised`, `price`, `price_date`, `last_quote`, `traded_days_20`, `avg_turnover_20`, `avg_turnover_20_m`, `days_since_trade`, `window_days`, `as_of`
-- ⚠ 全行が空の列: `alert_section`
 
 ```
 sec_code name market sector alert_section is_supervised  price price_date last_quote traded_days_20 avg_turnover_20 avg_turnover_20_m days_since_trade window_days      as_of
@@ -153,6 +151,6 @@ sec_code name market sector alert_section is_supervised  price price_date last_q
 
 ## 出力ページ
 
-- index.html: 57 KB / 更新 2026-08-22 01:02
-- shortlist.html: 50 KB / 更新 2026-08-22 01:03
-- local.html: 29 KB / 更新 2026-08-22 01:02
+- index.html: 57 KB / 更新 2026-08-22 03:13
+- shortlist.html: 50 KB / 更新 2026-08-22 03:13
+- local.html: 29 KB / 更新 2026-08-22 03:13
