@@ -133,6 +133,10 @@ jobs:
         continue-on-error: true
         run: python generate_shortlist.py
 
+      - name: コンテキスト生成
+        if: always()
+        run: python make_context.py
+
       - name: キャッシュ(CSV)、履歴データおよびHTMLをコミット・プッシュ
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
