@@ -57,6 +57,26 @@ TAGS_CASH = [
     "CashAndCashEquivalents",
 ]
 
+# ------------------------------------------------------------------
+# 発行済株式数
+# 「株式等の状況」の要素を優先度順に並べる。上ほど新しい時点の値。
+#   1) 提出日現在発行数    … 増資・自己株消却まで反映された最新値
+#   2) 事業年度末現在発行数 … BSの基準日と揃う値
+#   3) 主要な経営指標等の発行済株式総数 … 上2つが無い書類向けの保険
+# 提出者独自タクソノミで拡張されている場合に取りこぼさないよう、
+# 上記に一致しない場合も要素名に NumberOfIssuedShares を含むものは拾う
+# （発行可能株式総数 = NumberOfAuthorizedShares... は除外する）。
+# ------------------------------------------------------------------
+SHARE_TAG_PRIORITY = [
+    "NumberOfIssuedSharesAsOfFilingDateIssuedSharesTotalNumberOfSharesEtc",
+    "NumberOfIssuedSharesAsOfFiscalYearEndIssuedSharesTotalNumberOfSharesEtc",
+    "TotalNumberOfIssuedSharesSummaryOfBusinessResults",
+]
+
+# 常識外れの株数を弾くための範囲。上場企業の発行済株式数は最低でも数万株ある。
+MIN_PLAUSIBLE_SHARES = 10_000
+MAX_PLAUSIBLE_SHARES = 100_000_000_000
+
 
 def get_edinet_headers():
     return {
@@ -180,6 +200,45 @@ def parse_clean_amount(element):
     return int(val)
 
 
+def parse_share_amount(element):
+    """株数専用のパーサ。
+
+    parse_clean_amount は unitRef に share を含む要素を弾く仕様のため、
+    株数にはそのまま使えない。ここでは逆に「株単位以外」を弾く。
+    """
+    if not element or not element.text:
+        return None
+
+    unit_ref = str(element.get("unitRef") or element.get("unitref") or "").lower()
+    if unit_ref and "share" not in unit_ref:
+        return None
+
+    text_val = element.text.strip().replace(",", "")
+    try:
+        val = float(text_val)
+    except ValueError:
+        return None
+
+    scale = element.get("scale")
+    if scale is not None:
+        try:
+            val = val * (10 ** int(scale))
+        except ValueError:
+            pass
+
+    return int(val)
+
+
+def share_tag_rank(name):
+    """発行済株式数の要素かどうかを判定し、小さいほど優先度が高い値を返す。"""
+    for i, tag in enumerate(SHARE_TAG_PRIORITY):
+        if name == tag:
+            return i
+    if "NumberOfIssuedShares" in name and "Authorized" not in name:
+        return len(SHARE_TAG_PRIORITY)  # 提出者独自の拡張要素
+    return None
+
+
 def build_context_ranks(soup):
     """
     残高科目に使える instant コンテキストへ優先順位を付ける。
@@ -224,6 +283,81 @@ def build_context_ranks(soup):
             instants[ctx_id] = (instant_el.text or "").strip()
 
     return ranks, instants, has_nonconsolidated
+
+
+def build_share_contexts(soup):
+    """発行済株式数用のコンテキスト表。残高科目とは別基準で作る。
+
+    build_context_ranks との違いは2点。
+      ・FilingDateInstant を除外しない（株数はむしろ提出日現在が最新）
+      ・株式種類別（Member 付き）のコンテキストも採用対象に含める
+        ／種類株がある会社は普通株式・優先株式などに分かれて出るため
+    戻り値は ctx_id -> (優先度, instant日付)。
+    """
+    ctxs = {}
+
+    for ctx in soup.find_all(["context", "xbrli:context"]):
+        ctx_id = ctx.get("id")
+        if not ctx_id or "Prior" in ctx_id:
+            continue
+
+        instant_el = ctx.find(["instant", "xbrli:instant"])
+        if not instant_el:
+            continue
+
+        if "FilingDate" in ctx_id:
+            prio = 0
+        elif "CurrentYear" in ctx_id:
+            prio = 1
+        else:
+            prio = 2
+
+        ctxs[ctx_id] = (prio, (instant_el.text or "").strip())
+
+    return ctxs
+
+
+def extract_shares_outstanding(soup, share_ctxs, sec_code):
+    """発行済株式数を1つ選んで (株数, 基準日, 採用した要素名) を返す。
+
+    優先順位は (要素の優先度, コンテキストの優先度, 株数の降順)。
+    株数の降順にしているのは、種類株ごとに複数行ある場合に
+    「計」の行が最大値になるため。
+    """
+    best_key = None
+    best = (None, "", None)
+
+    for el in soup.find_all(True):
+        rank = share_tag_rank(el.name)
+        if rank is None:
+            continue
+
+        ctx_id = el.get("contextRef") or el.get("contextref") or ""
+        ctx_info = share_ctxs.get(ctx_id)
+        if ctx_info is None:
+            continue
+
+        val = parse_share_amount(el)
+        if val is None or val <= 0:
+            continue
+
+        prio, ctx_date = ctx_info
+        key = (rank, prio, -val)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = (val, ctx_date, el.name)
+
+    shares, as_of, tag = best
+
+    if shares is None:
+        return None, "", None
+
+    if not (MIN_PLAUSIBLE_SHARES <= shares <= MAX_PLAUSIBLE_SHARES):
+        # 千株単位でタグ付けされている等の異常値。時価総額を数百倍ずらすので捨てる。
+        logger.warning(f"[{sec_code}] 発行済株式数が範囲外のため破棄 (shares={shares}, tag={tag})")
+        return None, "", None
+
+    return shares, as_of, tag
 
 
 def fetch_xbrl_data(doc_id, sec_code):
@@ -282,6 +416,13 @@ def fetch_xbrl_data(doc_id, sec_code):
                 eq_val, _, eq_tag, _ = get_tag_value(TAGS_EQUITY)
                 cash_val, _, _, _ = get_tag_value(TAGS_CASH)
 
+                # 発行済株式数。取れなくても財務データ自体は使えるので、
+                # ここでの失敗は None を入れるだけにして書類は捨てない。
+                share_ctxs = build_share_contexts(soup)
+                shares_val, shares_as_of, shares_tag = extract_shares_outstanding(
+                    soup, share_ctxs, sec_code
+                )
+
                 # 貸借対照表の基準日。流動資産を採ったコンテキストを第一候補にする。
                 bs_date = ctx_instants.get(ca_ctx) or ctx_instants.get(ta_ctx) or ""
 
@@ -311,6 +452,15 @@ def fetch_xbrl_data(doc_id, sec_code):
                     logger.warning(f"[{sec_code}] 純資産 > 総資産 のため破棄 (eq={eq_val}, ta={ta_val})")
                     return None
 
+                # 株数の妥当性は BPS で見る。1株純資産が 1円未満・100万円超なら
+                # 桁がおかしい可能性が高いので、値は残しつつ警告だけ出す。
+                if shares_val:
+                    bps = eq_val / shares_val
+                    if not (1.0 <= bps <= 1_000_000.0):
+                        logger.warning(
+                            f"[{sec_code}] BPSが異常 (bps={bps:.2f}, shares={shares_val}, tag={shares_tag})"
+                        )
+
                 # 自己資本比率は「％」で保存する（下流で単位を推測しないため）
                 equity_ratio = round(eq_val / ta_val * 100.0, 2)
 
@@ -322,6 +472,9 @@ def fetch_xbrl_data(doc_id, sec_code):
                     "equity_type": eq_tag or "Unknown",
                     "equity_ratio": equity_ratio,
                     "cash_and_equivalents": cash_val,
+                    "shares_outstanding": shares_val,
+                    "shares_as_of": shares_as_of,
+                    "shares_source": shares_tag,
                     "consolidated": consolidated,
                     "accounting_standard": accounting_std,
                     "bs_date": bs_date
@@ -347,7 +500,8 @@ def main():
     columns = [
         "sec_code", "filer_name", "current_assets", "total_liabilities",
         "total_assets", "equity_value", "equity_type", "equity_ratio",
-        "cash_and_equivalents", "doc_id", "submit_date", "doc_type",
+        "cash_and_equivalents", "shares_outstanding", "shares_as_of",
+        "shares_source", "doc_id", "submit_date", "doc_type",
         "accounting_standard", "consolidated", "fiscal_period", "bs_date"
     ]
 
@@ -355,6 +509,8 @@ def main():
         "sec_code": "string",
         "filer_name": "string",
         "equity_type": "string",
+        "shares_as_of": "string",
+        "shares_source": "string",
         "doc_id": "string",
         "submit_date": "string",
         "doc_type": "string",
@@ -366,7 +522,8 @@ def main():
 
     NUMERIC_COLS = [
         "current_assets", "total_liabilities", "total_assets",
-        "equity_value", "equity_ratio", "cash_and_equivalents"
+        "equity_value", "equity_ratio", "cash_and_equivalents",
+        "shares_outstanding"
     ]
 
     if os.path.exists(CACHE_FILE):
@@ -388,7 +545,7 @@ def main():
     else:
         df_cache = pd.DataFrame(columns=columns).set_index("sec_code")
 
-    # 新設列（cash_and_equivalents, bs_date など）が無い旧キャッシュへの追随
+    # 新設列（cash_and_equivalents, bs_date, shares_* など）が無い旧キャッシュへの追随
     for col in columns:
         if col != "sec_code" and col not in df_cache.columns:
             df_cache[col] = pd.NA
@@ -424,6 +581,7 @@ def main():
     success_count = 0
     fail_count = 0
     skip_count = 0
+    no_shares_count = 0
 
     for idx, doc in enumerate(unique_targets, 1):
         sec_code = doc["sec_code"]
@@ -439,6 +597,10 @@ def main():
         try:
             fin = fetch_xbrl_data(doc_id, sec_code)
             if fin:
+                if not fin["shares_outstanding"]:
+                    no_shares_count += 1
+                    logger.info(f"[{sec_code}] 発行済株式数を取得できませんでした (doc_id={doc_id})")
+
                 df_new.loc[sec_code] = {
                     "filer_name": doc["filer_name"],
                     "current_assets": fin["current_assets"],
@@ -448,6 +610,9 @@ def main():
                     "equity_type": fin["equity_type"],
                     "equity_ratio": fin["equity_ratio"],
                     "cash_and_equivalents": fin["cash_and_equivalents"],
+                    "shares_outstanding": fin["shares_outstanding"],
+                    "shares_as_of": fin["shares_as_of"],
+                    "shares_source": fin["shares_source"],
                     "doc_id": doc_id,
                     "submit_date": doc["submit_date"],
                     "doc_type": doc["doc_type"],
@@ -467,6 +632,8 @@ def main():
         time.sleep(0.1)
 
     logger.info(f"解析完了 - 新規取得: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
+    if success_count:
+        logger.info(f"うち発行済株式数が取れなかった件数: {no_shares_count}件")
 
     df_new = df_new.reset_index()
 
