@@ -3,20 +3,27 @@
 
   https://www.nse.or.jp/market/condition/quick/files/sokuhou.pdf
     日通しの株式相場表（速報）。16:00頃更新。URLは固定で毎日上書きされる。
+    → 上書きされる以上、取得したPDFは raw_pdf/ に必ず残す。パース仕様を
+      後から変えても、原本さえあれば過去分を作り直せる。
 
 PDFの構造（2026年8月時点）:
   - 銘柄コードは旧5桁体系（例: 17660 = 1766、546A0 = 546A）。先頭4文字が現行コード。
-  - 銘柄名は全角、価格・売買高は半角。この違いで数値だけを安全に抜ける。
+  - 銘柄名は全角。マーク類（信用区分等）は半角カナ・半角記号で前後に付く。
+    「ｶ」のような半角カナのマークが確認されているため、気配マーク「ｹ」も
+    マークとして出現しうる前提で、「ｹ + 数値」の並びだけを気配値として扱う。
   - 売買が成立していない銘柄は値段欄が空で「ｹ + 最終気配」だけが載る。
     名証上場銘柄の大半は東証との重複上場で、名証では売買不成立の日が多い。
+  - 売買高は千株単位・小数第1位（例: 5.9 = 5,900株）。
   - 前日比は符号付き（+10 / -36）。変化なしの日は欄ごと空になる。
   - 【プレミア市場】【メイン市場】【ネクスト市場】で市場区分、＜建設業＞で業種。
-  - 末尾に「監理銘柄」の区画があり、そこに載る銘柄は監理銘柄。
+  - 末尾に「監理銘柄」「整理銘柄」の区画がある。この区画には市場区分が
+    書かれないため、market は None にして alert_section に区分を持たせる。
 
 使い方:
   python fetch_local_prices.py                 # PDFを取得して local_prices.csv を出力
   python fetch_local_prices.py --file x.pdf    # ローカルのPDFを解析
   python fetch_local_prices.py --probe         # 構造をダンプ（調整用）
+  python fetch_local_prices.py --no-archive    # 原本を保存しない（検証時のみ）
 """
 
 import io
@@ -35,6 +42,7 @@ JST = timezone(timedelta(hours=9))
 NSE_QUICK_PDF = "https://www.nse.or.jp/market/condition/quick/files/sokuhou.pdf"
 HISTORY_FILE = "local_price_history.csv"   # 日次の生データを追記していく
 OUTPUT_FILE = "local_prices.csv"           # 集計後の最新スナップショット
+RAW_DIR = "raw_pdf"                        # 取得したPDFの原本
 
 WINDOW_DAYS = 20    # 流動性の集計期間（営業日）
 RETAIN_DAYS = 40    # 履歴として保持する営業日数
@@ -42,12 +50,22 @@ RETAIN_DAYS = 40    # 履歴として保持する営業日数
 # 旧5桁コード（先頭4文字が現行の証券コード、5文字目は常に0）
 CODE_RE = re.compile(r"^\s*([0-9][0-9A-Z]{3})0(?![0-9A-Z])\s*(.*)$")
 NUM_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?")
+# 気配値は「ｹ の直後に数値」が来る並びだけを認める。
+# 単独の「ｹ」は銘柄名のマークである可能性があるため分割に使わない。
+QUOTE_RE = re.compile(r"ｹ\s*([+-]?\d[\d,]*(?:\.\d+)?)")
 MARKET_RE = re.compile(r"【(.+?)】")
 SECTOR_RE = re.compile(r"[＜<](.+?)[＞>]")
 DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+# 監理・整理の区画見出し。凡例や注記の文中に出る「監理銘柄」を拾わないよう、
+# 行全体が見出しになっている場合だけを認める。
+ALERT_HEADER_RE = re.compile(r"^[（(【\s]*(監理|整理)銘柄[）)】\s]*$")
 
-# 銘柄名の前後に付く記号（信用区分・売買単位・権利落ち等）
-NAME_MARKS = "●○◎△□＃◇§ 　ABC"
+# 銘柄名の前後に付くマーク。全角記号に加えて、半角英数記号(U+0020-007E)と
+# 半角カナ(U+FF61-FF9F)を「名前ではないもの」として前後から落とす。
+# 銘柄名そのものは全角で構成されるため、この扱いで名前は削られない。
+FULLWIDTH_MARKS = "●○◎△▲□■＃♯◇◆§※★☆"
+EDGE_JUNK_RE = re.compile(r"^[\s\u3000\u0020-\u007E\uFF61-\uFF9F" + FULLWIDTH_MARKS + r"]+")
+EDGE_JUNK_END_RE = re.compile(r"[\s\u3000\u0020-\u007E\uFF61-\uFF9F" + FULLWIDTH_MARKS + r"]+$")
 
 # 除外する区画（株式ではない）
 NON_STOCK_MARKETS = ("証券投資信託受益証券", "新株予約権証券", "債券")
@@ -60,11 +78,25 @@ logging.basicConfig(
 logger = logging.getLogger("LocalPrices")
 
 
-def download_pdf(url):
+def download_pdf(url, archive=True):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     res = requests.get(url, headers=headers, timeout=30)
     res.raise_for_status()
-    logger.info(f"PDF取得: {url} ({len(res.content):,} bytes)")
+
+    msg = f"PDF取得: {url} ({len(res.content):,} bytes)"
+
+    if archive:
+        # 固定URLで毎日上書きされるため、取得できた原本は必ず残す。
+        # ファイル名は「取得日」。中身の相場日とずれる場合（非営業日実行）が
+        # あるが、両方あるほうが後から判別できる。
+        os.makedirs(RAW_DIR, exist_ok=True)
+        stamp = datetime.now(JST).strftime("%Y%m%d")
+        path = os.path.join(RAW_DIR, f"sokuhou_{stamp}.pdf")
+        with open(path, "wb") as f:
+            f.write(res.content)
+        msg += f" -> {path}"
+
+    logger.info(msg)
     return io.BytesIO(res.content)
 
 
@@ -73,6 +105,16 @@ def to_float(token):
         return float(token.replace(",", "").lstrip("+"))
     except ValueError:
         return None
+
+
+def clean_name(raw):
+    """銘柄名の前後からマーク類・空白・半角文字を落とす。"""
+    if not raw:
+        return ""
+    s = raw.replace("\u3000", " ")
+    s = EDGE_JUNK_RE.sub("", s)
+    s = EDGE_JUNK_END_RE.sub("", s)
+    return s.strip()
 
 
 def parse_row(line):
@@ -90,18 +132,20 @@ def parse_row(line):
 
     sec_code, rest = m.group(1), m.group(2)
 
-    # 「ｹ」より前後で分割する（ｹ の直後の数値が最終気配）
-    if "ｹ" in rest:
-        left, right = rest.split("ｹ", 1)
+    # 「ｹ + 数値」の並びで分割する。単独の「ｹ」は銘柄名のマークなので使わない。
+    qm = QUOTE_RE.search(rest)
+    if qm:
+        left, right = rest[:qm.start()], rest[qm.start():]
     else:
         left, right = rest, ""
 
-    # 銘柄名は全角のみで構成されるため、半角数値だけを拾えば値段欄が取れる
     left_tokens = NUM_RE.findall(left)
     right_tokens = NUM_RE.findall(right)
 
-    name = left.split(NUM_RE.search(left).group())[0] if left_tokens else left
-    name = name.strip().strip(NAME_MARKS).strip()
+    # 銘柄名は全角のみで構成されるため、最初の半角数値より前が名前
+    first_num = NUM_RE.search(left)
+    raw_name = left[:first_num.start()] if first_num else left
+    name = clean_name(raw_name)
 
     row = {
         "sec_code": sec_code,
@@ -143,21 +187,36 @@ def parse_row(line):
     return row
 
 
+def _has_stock_rows(text):
+    return any(CODE_RE.match(line) for line in text.split("\n"))
+
+
 def extract_columns(page):
     """
     相場表は1ページが左右2カラム組みになっている。
     行単位でテキストを読むと左カラムの銘柄に右カラムの株価が連結されてしまうため、
     「コード」ヘッダーのX座標でページを切り、カラムごとにテキストを取り出す。
+
+    ヘッダーを検出できないまま単一カラムとして扱うと、左右が連結された行が
+    「約定あり」として無音で通ってしまう。銘柄行を含むページで検出に失敗した
+    場合は、警告を出したうえで中央分割にフォールバックする。
     """
     header_x = sorted(
         w["x0"] for w in page.extract_words() if w["text"].startswith("コード")
     )
 
-    if len(header_x) < 2:
-        # 単一カラムのページ（表紙・注記のみ等）
-        return [page.extract_text() or ""]
+    if len(header_x) >= 2:
+        split_x = header_x[-1] - 4
+    else:
+        text = page.extract_text() or ""
+        if not _has_stock_rows(text):
+            return [text]  # 表紙・注記など銘柄行の無いページ
+        logger.warning(
+            f"p.{page.page_number}: コードヘッダーを検出できませんでした。"
+            "中央分割にフォールバックします（値がずれている可能性あり）。"
+        )
+        split_x = page.width / 2
 
-    split_x = header_x[-1] - 4
     left = page.crop((0, 0, split_x, page.height))
     right = page.crop((split_x, 0, page.width, page.height))
     return [left.extract_text() or "", right.extract_text() or ""]
@@ -166,7 +225,7 @@ def extract_columns(page):
 def parse_pdf(pdf_source):
     market = None
     sector = None
-    supervised = False
+    alert_section = None
     price_date = None
     rows = []
 
@@ -182,16 +241,15 @@ def parse_pdf(pdf_source):
                     mk = MARKET_RE.search(line)
                     if mk:
                         market = mk.group(1)
-                        supervised = False
+                        alert_section = None
                         continue
 
-                    if "監理銘柄" in line:
-                        supervised = True
-                        market = "監理銘柄"
-                        continue
-                    if "整理銘柄" in line:
-                        supervised = True
-                        market = "整理銘柄"
+                    am = ALERT_HEADER_RE.match(line.strip())
+                    if am:
+                        # 監理・整理の区画。この区画には市場区分の記載が無いので
+                        # market は None にし、区分は別列で持つ。
+                        alert_section = am.group(1)
+                        market = None
                         continue
 
                     sc = SECTOR_RE.search(line)
@@ -203,7 +261,8 @@ def parse_pdf(pdf_source):
                     if row:
                         row["market"] = market
                         row["sector"] = sector
-                        row["is_supervised"] = supervised
+                        row["alert_section"] = alert_section
+                        row["is_supervised"] = alert_section is not None
                         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -212,6 +271,19 @@ def parse_pdf(pdf_source):
 
     # 株式以外（ETF等）を除外
     df = df[~df["market"].isin(NON_STOCK_MARKETS)].copy()
+
+    # 同一銘柄が通常区画と監理区画の両方に載る場合、market が None の行が
+    # 残らないよう、非欠損の値を全行へ寄せてから重複を潰す。
+    for col in ("market", "sector"):
+        df[col] = df.groupby("sec_code")[col].transform(
+            lambda s: s.dropna().iloc[0] if s.notna().any() else None
+        )
+    for col in ("alert_section",):
+        df[col] = df.groupby("sec_code")[col].transform(
+            lambda s: s.dropna().iloc[-1] if s.notna().any() else None
+        )
+    df["is_supervised"] = df.groupby("sec_code")["is_supervised"].transform("max")
+
     df = df.drop_duplicates(subset=["sec_code"], keep="last")
     df.insert(0, "date", price_date)
     return df, price_date
@@ -225,15 +297,29 @@ def probe(pdf_source):
             print((page.extract_text() or "")[:3000])
 
 
+def _coerce_bools(df, cols=("traded", "is_supervised")):
+    """CSV往復で bool が "True"/"False" の文字列になるのを防ぐ。"""
+    for col in cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.lower().isin(("true", "1"))
+    return df
+
+
 def update_history(daily_df):
     """当日分を履歴に追記し、直近 RETAIN_DAYS 営業日分に切り詰めた履歴を返す。"""
-    keep_cols = ["date", "sec_code", "name", "market", "sector", "is_supervised",
+    keep_cols = ["date", "sec_code", "name", "market", "sector",
+                 "alert_section", "is_supervised",
                  "close", "last_quote", "volume_k", "traded", "turnover"]
     daily_df = daily_df[keep_cols]
 
     if os.path.exists(HISTORY_FILE):
         history = pd.read_csv(HISTORY_FILE, dtype={"sec_code": str, "date": str})
-        history = pd.concat([history, daily_df], ignore_index=True)
+        history = _coerce_bools(history)
+        # 旧フォーマット（alert_section 無し）への追随
+        for col in keep_cols:
+            if col not in history.columns:
+                history[col] = pd.NA
+        history = pd.concat([history[keep_cols], daily_df], ignore_index=True)
     else:
         history = daily_df.copy()
 
@@ -250,28 +336,35 @@ def update_history(daily_df):
     return history
 
 
+def _latest_non_empty(series):
+    """期間内で最後に得られた非空の値。銘柄名や市場区分の欠落を埋める。"""
+    s = series.dropna()
+    s = s[s.astype(str).str.strip() != ""]
+    return s.iloc[-1] if not s.empty else None
+
+
 def summarize(history):
     """
     直近 WINDOW_DAYS 営業日から銘柄ごとの流動性指標を作る。
 
-      price            : 期間内で最後に約定した終値（気配値は使わない）
-      price_date       : その約定日
-      traded_days_20   : 期間内に約定が成立した日数
-      avg_turnover_20  : 1日平均売買代金（約定のない日は0として平均する）
-      days_since_trade : 最終約定日から何営業日経過したか
+      price               : 期間内で最後に約定した終値（気配値は使わない）
+      price_date          : その約定日
+      traded_days_20      : 期間内に約定が成立した日数
+      avg_turnover_20     : 1日平均売買代金・円（約定のない日は0として平均する）
+      avg_turnover_20_m   : 同・百万円（price_metrics.py と単位を揃えるため）
+      days_since_trade    : 最終約定日から何営業日経過したか
     """
+    history = _coerce_bools(history.copy())
+
     dates = sorted(history["date"].dropna().unique())
     window = dates[-WINDOW_DAYS:]
     win = history[history["date"].isin(window)].copy()
     latest_date = dates[-1]
 
-    # 最新日の属性（銘柄名・市場・監理フラグ・気配値）を土台にする
-    latest = win[win["date"] == latest_date].set_index("sec_code")
-
     records = []
     for sec_code, group in win.groupby("sec_code"):
         group = group.sort_values("date")
-        traded = group[group["traded"] == True]  # noqa: E712
+        traded = group[group["traded"]]
 
         if not traded.empty:
             last_trade = traded.iloc[-1]
@@ -281,19 +374,23 @@ def summarize(history):
         else:
             price, price_date, days_since = None, None, None
 
-        base = latest.loc[sec_code] if sec_code in latest.index else group.iloc[-1]
+        turnover_yen = round(group["turnover"].fillna(0).sum() / len(window))
 
         records.append({
             "sec_code": sec_code,
-            "name": base["name"],
-            "market": base["market"],
-            "sector": base["sector"],
-            "is_supervised": bool(base["is_supervised"]),
+            # 属性は最新日ではなく「期間内で最後に取れた非空の値」を使う。
+            # 名前が空で抽出された日があっても他の日の値で埋まる。
+            "name": _latest_non_empty(group["name"]),
+            "market": _latest_non_empty(group["market"]),
+            "sector": _latest_non_empty(group["sector"]),
+            "alert_section": _latest_non_empty(group["alert_section"]),
+            "is_supervised": bool(group["is_supervised"].max()),
             "price": price,
             "price_date": price_date,
-            "last_quote": base["last_quote"],
+            "last_quote": _latest_non_empty(group["last_quote"]),
             "traded_days_20": int(group["traded"].sum()),
-            "avg_turnover_20": round(group["turnover"].fillna(0).sum() / len(window)),
+            "avg_turnover_20": turnover_yen,
+            "avg_turnover_20_m": round(turnover_yen / 1e6, 1),
             "days_since_trade": days_since,
             "window_days": len(window),
             "as_of": latest_date,
@@ -308,9 +405,11 @@ def main():
     parser.add_argument("--probe", action="store_true", help="構造をダンプして終了")
     parser.add_argument("--file", help="ローカルPDFを解析する")
     parser.add_argument("--url", default=NSE_QUICK_PDF)
+    parser.add_argument("--no-archive", action="store_true",
+                        help="取得したPDFを raw_pdf/ に保存しない")
     args = parser.parse_args()
 
-    source = args.file if args.file else download_pdf(args.url)
+    source = args.file if args.file else download_pdf(args.url, archive=not args.no_archive)
 
     if args.probe:
         probe(source)
@@ -332,6 +431,16 @@ def main():
     traded = int(daily_df["traded"].sum())
     logger.info(f"相場日: {price_date}")
     logger.info(f"抽出銘柄数: {len(daily_df)}件（約定あり {traded}件 / 気配のみ {len(daily_df) - traded}件）")
+
+    # 銘柄名が取れなかった行はパース不良の兆候。件数とコードを出しておく。
+    blank_names = daily_df[daily_df["name"].fillna("").str.strip() == ""]
+    if not blank_names.empty:
+        codes = ", ".join(blank_names["sec_code"].tolist()[:20])
+        logger.warning(f"⚠ 銘柄名を抽出できなかった行: {len(blank_names)}件 ({codes})")
+
+    supervised = int(daily_df["is_supervised"].sum())
+    if supervised:
+        logger.info(f"監理・整理区画の銘柄: {supervised}件")
 
     history = update_history(daily_df)
     n_dates = history["date"].nunique()
