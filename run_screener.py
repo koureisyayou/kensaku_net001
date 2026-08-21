@@ -5,6 +5,9 @@ import logging
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
+
+import financials
+from financials import safe_get  # 移設元と同名で使えるように再エクスポート
 from price_metrics import add_price_metrics
 
 # ログ設定：ファイルと標準出力（GitHub Actionsコンソール）の両方に出力
@@ -30,9 +33,6 @@ CANDIDATE_SUFFIXES = [".T"]
 # スクリーニング条件
 MIN_EQUITY_RATIO = 30.0   # 自己資本比率(%)
 MIN_NC_RATIO = 1.0        # NCAV / 時価総額
-
-# 財務データの許容誤差（端数・単位差を吸収するための係数）
-TOLERANCE = 1.05
 
 # yfinance へのリクエスト間隔（秒）。短すぎるとレート制限で連続失敗する。
 REQUEST_INTERVAL = 0.4
@@ -88,33 +88,6 @@ def save_stock_cache(cache):
     df = pd.DataFrame(rows)
     df.to_csv(CACHE_FILE, index=False, encoding="utf-8")
     logger.info(f"株価・株式数キャッシュ保存完了: {len(df)}件")
-
-
-def safe_get(row, key, default=None):
-    """Series から欠損に強く値を取り出す（列が存在しない場合も default を返す）"""
-    if key in row.index:
-        val = row[key]
-        if pd.notnull(val):
-            return val
-    return default
-
-
-def to_percent(val):
-    """
-    自己資本比率を％に揃える。
-    update_financials.py は％で保存するようになったが、
-    比率(0〜1)で保存された旧 financial_cache.csv との互換のために残している。
-    キャッシュを --full で作り直した後は削除して構わない。
-    """
-    if pd.isnull(val):
-        return None
-    try:
-        val = float(val)
-    except (TypeError, ValueError):
-        return None
-    if 0 < val <= 1.0:
-        return val * 100.0
-    return val
 
 
 def fetch_shares_count(ticker):
@@ -233,101 +206,13 @@ def diagnose_and_fetch_stock_data(sec_code, cached_info, today_str):
         yf_logger.setLevel(prev_level)
 
 
-def prepare_financials(financial_df):
-    """財務キャッシュの列名・単位を、以降の処理で使う形に正規化する"""
-
-    # 社名列の正規化：financial_cache.csv は filer_name で保存されている。
-    # これを company_name に写しておかないと、候補CSV・HTML・履歴から社名が消える。
-    if "company_name" not in financial_df.columns and "filer_name" in financial_df.columns:
-        financial_df["company_name"] = financial_df["filer_name"]
-    if "company_name" not in financial_df.columns:
-        financial_df["company_name"] = ""
-    financial_df["company_name"] = financial_df["company_name"].fillna("")
-
-    # 自己資本比率の単位を％に統一する。
-    # ※ equity_value / total_assets からの再計算はしない。
-    #    旧キャッシュには両方とも誤抽出された行が含まれており、再計算すると
-    #    1,000% 超のような不正な行を復活させてしまうため。
-    #    比率が欠損している行は validate_financials で除外する。
-    if "equity_ratio" not in financial_df.columns:
-        financial_df["equity_ratio"] = None
-    financial_df["equity_ratio"] = financial_df["equity_ratio"].apply(to_percent)
-
-    for col in ("current_assets", "total_liabilities", "total_assets", "equity_value"):
-        if col in financial_df.columns:
-            financial_df[col] = pd.to_numeric(financial_df[col], errors="coerce")
-
-    return financial_df
-
-
-def validate_financials(financial_df):
-    """
-    ありえない財務データを除外する。
-    XBRLの科目取り違えは「自己資本比率が100%を超える」「流動資産が総資産を超える」
-    といった形で表面化するので、ここで機械的に落とす。
-    """
-    df = financial_df
-
-    for col in ("current_assets", "total_liabilities", "total_assets"):
-        if col not in df.columns:
-            logger.error(f"財務キャッシュに必須列 {col} がありません。")
-            return df.iloc[0:0], df
-
-    ok = (
-        df["total_assets"].notnull() & (df["total_assets"] > 0)
-        & df["current_assets"].notnull() & (df["current_assets"] >= 0)
-        & df["total_liabilities"].notnull() & (df["total_liabilities"] >= 0)
-        & (df["current_assets"] <= df["total_assets"] * TOLERANCE)
-        & (df["total_liabilities"] <= df["total_assets"] * TOLERANCE)
-        # 流動資産と総資産が1円単位で一致する行は、同じ数値を二重に拾っている疑いが濃い
-        # （固定資産が完全にゼロの上場企業は実質存在しない）
-        & (df["current_assets"] != df["total_assets"])
-        & df["equity_ratio"].notnull()
-        & (df["equity_ratio"] > 0)
-        & (df["equity_ratio"] <= 100.0 * TOLERANCE)
-    )
-
-    # 貸借対照表の恒等式チェック：純資産は「総資産 - 総負債」を超えられない。
-    # 非支配株主持分の分だけ小さくなるのは正常なので、上振れのみを弾く。
-    if "equity_value" in df.columns:
-        ok = ok & (
-            df["equity_value"].isnull()
-            | (df["equity_value"] <= (df["total_assets"] - df["total_liabilities"]) * TOLERANCE)
-        )
-
-    valid_df = df[ok].copy()
-    invalid_df = df[~ok].copy()
-
-    # 端数由来の 100.4% などを整える
-    valid_df["equity_ratio"] = valid_df["equity_ratio"].clip(upper=100.0)
-
-    # 除外が0件でもヘッダーのみのファイルを必ず出力する。
-    # ファイルが存在しないと git-auto-commit-action の file_pattern が
-    # 「pathspec did not match any files」で失敗するため。
-    cols = [c for c in ["sec_code", "filer_name", "company_name", "current_assets",
-                        "total_liabilities", "total_assets", "equity_value",
-                        "equity_ratio", "doc_id", "fiscal_period", "bs_date",
-                        "submit_date"] if c in df.columns]
-    invalid_df[cols].to_csv(INVALID_FILE, index=False, encoding="utf-8-sig")
-
-    if not invalid_df.empty:
-        logger.warning(
-            f"⚠ 財務データが不正な {len(invalid_df)} 銘柄を除外しました。"
-            f"内訳は {INVALID_FILE} を確認してください（XBRL抽出の取りこぼしの可能性があります）。"
-        )
-    else:
-        logger.info("財務データの妥当性チェック: 除外0件")
-
-    return valid_df, invalid_df
-
-
 def run_pipeline(financial_df):
     """スクリーニングパイプライン実行"""
     today_str = datetime.now().strftime("%Y-%m-%d")
     stock_cache = load_stock_cache()
 
-    financial_df = prepare_financials(financial_df)
-    financial_df, _ = validate_financials(financial_df)
+    financial_df = financials.prepare(financial_df)
+    financial_df, _ = financials.validate(financial_df, invalid_path=INVALID_FILE)
     logger.info(f"【妥当性チェック】検証を通過した銘柄: {len(financial_df)}件")
 
     if financial_df.empty:
