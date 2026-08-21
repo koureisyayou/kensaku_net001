@@ -33,6 +33,21 @@ KIND_COLS = ["内容", "指定内容", "区分"]
 FROM_COLS = ["指定年月日", "指定日"]
 UNTIL_COLS = ["解除年月日", "解除日"]
 
+# 取得経路。呼び出し側が「除外0件」と「そもそも突合できていない」を
+# 区別できるようにするため、返す DataFrame に必ず記録する。
+SOURCE_LIVE = "live"      # JPX から取得できた
+SOURCE_CACHE = "cache"    # 取得に失敗し前回のキャッシュを使った
+SOURCE_FAILED = "failed"  # 取得もキャッシュも無い＝突合できていない
+
+
+def _tag(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    df.attrs["source"] = source
+    return df
+
+
+def _empty() -> pd.DataFrame:
+    return pd.DataFrame(columns=["コード", "銘柄名", "区分", "指定年月日"])
+
 
 def _pick(df: pd.DataFrame, candidates: list[str]) -> str | None:
     for c in candidates:
@@ -87,14 +102,17 @@ def fetch_alerts(use_cache_on_error: bool = True) -> pd.DataFrame:
         print(f"[jpx_alerts] 取得に失敗しました: {exc}")
         if use_cache_on_error and CACHE_CSV.exists():
             print(f"[jpx_alerts] キャッシュを使用: {CACHE_CSV}")
-            return pd.read_csv(CACHE_CSV, dtype=str)
-        return pd.DataFrame(columns=["コード", "銘柄名", "区分", "指定年月日"])
+            return _tag(pd.read_csv(CACHE_CSV, dtype=str), SOURCE_CACHE)
+        print("[jpx_alerts] ❌ 監理・整理の突合ができません。除外は行われません。")
+        return _tag(_empty(), SOURCE_FAILED)
 
     if not frames:
         print("[jpx_alerts] 表を検出できませんでした。ページ構成が変わった可能性があります。")
         if use_cache_on_error and CACHE_CSV.exists():
-            return pd.read_csv(CACHE_CSV, dtype=str)
-        return pd.DataFrame(columns=["コード", "銘柄名", "区分", "指定年月日"])
+            print(f"[jpx_alerts] キャッシュを使用: {CACHE_CSV}")
+            return _tag(pd.read_csv(CACHE_CSV, dtype=str), SOURCE_CACHE)
+        print("[jpx_alerts] ❌ 監理・整理の突合ができません。除外は行われません。")
+        return _tag(_empty(), SOURCE_FAILED)
 
     alerts = pd.concat(frames, ignore_index=True)
 
@@ -113,7 +131,7 @@ def fetch_alerts(use_cache_on_error: bool = True) -> pd.DataFrame:
 
     alerts.to_csv(CACHE_CSV, index=False, encoding="utf-8-sig")
     print(f"[jpx_alerts] 監理 {(alerts['区分'] == '監理').sum()} 件 / 整理 {(alerts['区分'] == '整理').sum()} 件")
-    return alerts
+    return _tag(alerts, SOURCE_LIVE)
 
 
 if __name__ == "__main__":
