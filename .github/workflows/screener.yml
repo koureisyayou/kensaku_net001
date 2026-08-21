@@ -117,8 +117,35 @@ jobs:
       # これも累積ファイルなので、必ずリモート追従より後に実行する。
       # 地方版は本体のおまけなので、失敗しても pipeline は止めない。
       - name: 名証の株価取得
+        id: local_prices
         continue-on-error: true
         run: python fetch_local_prices.py
+
+      # PDFは固定URLで毎日上書きされるため、取得できた原本を必ず残す。
+      # パースに失敗したときこそ必要なので if: always() にしている。
+      # リポジトリにコミットするとPages成果物とgit履歴が永久に肥大化するので
+      # アーティファクト（90日保持）に逃がす。
+      - name: 名証PDF原本の保存 (Artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-raw-pdf-${{ github.run_id }}
+          path: raw_pdf/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      # continue-on-error だと失敗しても全体が緑になり、蓄積が止まったことに
+      # 気づけない。outcome を拾って通知だけ出す。
+      - name: 地方版の失敗を通知
+        if: steps.local_prices.outcome == 'failure'
+        uses: dacbd/create-issue-action@v2
+        with:
+          token: ${{ github.token }}
+          title: "⚠️ [Local] 名証の株価取得に失敗しました"
+          body: |
+            local_price_history.csv への追記が行われていません。
+            蓄積期間中の欠損は後から埋められないため、早めに確認してください。
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: HTMLページ生成
         run: python generate_html.py
