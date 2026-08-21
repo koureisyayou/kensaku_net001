@@ -83,7 +83,6 @@ def to_number(series: pd.Series) -> pd.Series:
         errors="coerce",
     )
 
-
 # ----------------------------------------------------- 連続掲載日数の算出
 
 def load_streaks(path: Path, code_col_hint: str) -> dict[str, int]:
@@ -120,7 +119,7 @@ def load_streaks(path: Path, code_col_hint: str) -> dict[str, int]:
 
 # ------------------------------------------------------------- 絞り込み
 
-def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int]], pd.DataFrame]:
+def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int]], pd.DataFrame, str]:
     code_col, name_col = resolve(df, "code"), resolve(df, "name")
     work = df.copy()
     work[code_col] = work[code_col].astype(str).str.strip()
@@ -159,6 +158,11 @@ def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int
 
     # --- JPX 監理・整理銘柄の突合 ---
     alerts = fetch_alerts()
+    # 取得できなかった場合、除外は一件も行われない。
+    # 「除外0件」と区別がつかないと整理銘柄が黙って通るので、経路を持ち回る。
+    alert_source = alerts.attrs.get("source", "unknown")
+    if alert_source != "live":
+        print(f"[shortlist] ⚠ JPX指定の突合が不完全です (source={alert_source})")
     alert_map = dict(zip(alerts["コード"].astype(str).str.strip(), alerts["区分"])) if not alerts.empty else {}
     work["JPX指定"] = work[code_col].map(alert_map)
     flagged = work.loc[work["JPX指定"].notna(), [code_col, name_col, "JPX指定"]].copy()
@@ -187,7 +191,7 @@ def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int
     drop(streak.notna() & (streak > MAX_STREAK_DAYS), f"連続掲載{MAX_STREAK_DAYS}日超")
 
     stages.append(("残り", len(work)))
-    return work, stages, flagged
+    return work, stages, flagged, alert_source
 
 
 # ----------------------------------------------------------------- 出力
@@ -275,7 +279,8 @@ def cell(value, fmt="{:,.1f}", signed=False, extra_class="") -> str:
         return f'<td class="{cls}" data-sort="{raw}">{raw}</td>'
 
 
-def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFrame) -> str:
+def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFrame,
+           alert_source: str = "live") -> str:
     code_col, name_col = resolve(df, "code"), resolve(df, "name")
     cols = [
         ("株価", "_株価", "{:,.0f}", False),
@@ -326,14 +331,21 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
                    f'<div class="num {cls}">{text}</div></div>')
 
     alert_html = ""
+    if alert_source != "live":
+        reason = ("前回取得分のキャッシュを使用しています"
+                  if alert_source == "cache"
+                  else "JPXから取得できず、整理・監理銘柄の除外が行われていません")
+        alert_html += ('<div class="alertbox"><h2>上場廃止リスクの篩が機能していません</h2>'
+                       f'{html.escape(reason)}。この一覧には整理・監理銘柄が'
+                       'そのまま含まれている可能性があります。</div>')
     if not flagged.empty:
         items = "、".join(
             f'<code>{html.escape(str(r.iloc[0]))}</code> {html.escape(str(r.iloc[1]))}'
             f'（{html.escape(str(r.iloc[2]))}銘柄）'
             for _, r in flagged.iterrows()
         )
-        alert_html = ('<div class="alertbox"><h2>一次候補にJPXの監理・整理銘柄が含まれています</h2>'
-                      f'{items}</div>')
+        alert_html += ('<div class="alertbox"><h2>一次候補にJPXの監理・整理銘柄が含まれています</h2>'
+                       f'{items}</div>')
 
     updated = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
     return f"""<!DOCTYPE html>
@@ -378,10 +390,13 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
 """
 
 
+
 def main() -> None:
     df = pd.read_csv(CANDIDATES_CSV, dtype={"sec_code": str})
-    shortlist, stages, flagged = build_shortlist(df)
-    OUTPUT_HTML.write_text(render(shortlist, stages, flagged), encoding="utf-8")
+    shortlist, stages, flagged, alert_source = build_shortlist(df)
+    OUTPUT_HTML.write_text(
+        render(shortlist, stages, flagged, alert_source), encoding="utf-8"
+    )
     print(" → ".join(f"{label} {n}" for label, n in stages))
 
 
