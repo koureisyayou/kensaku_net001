@@ -1,0 +1,20 @@
+name: XBRL Inspect
+on:
+  workflow_dispatch:
+    inputs:
+      codes:
+        description: '証券コード（スペース区切り）'
+        default: '7203 8001 6758'
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests beautifulsoup4 lxml
+      - env:
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+        run: python inspect_xbrl.py ${{ inputs.codes }}
