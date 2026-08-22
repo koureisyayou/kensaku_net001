@@ -21,6 +21,13 @@ JST = timezone(timedelta(hours=9))
 PREFER_AMENDMENT = False
 AMENDMENT_TYPES = {"130", "150", "170"}
 
+# --repair で「値が欠けていたら再取得する」対象の列。
+# 新設列を追加した直後は、既存書類が processed_docs.csv でスキップされるため
+# 永久に埋まらない。その穴を埋め直すための仕組み。
+# ※ shares_outstanding は元々取得できない書類が一定数あるので、
+#   一度埋め直したらこのリストから外す方が無駄な再取得を防げる。
+REPAIR_COLS = ["bs_date", "shares_outstanding"]
+
 # ログ設定
 logging.basicConfig(
     level=logging.INFO,
@@ -391,9 +398,17 @@ def fetch_xbrl_data(doc_id, sec_code):
                     return None
 
                 def get_tag_value(tag_names):
-                    """優先順位が最も高いコンテキストの値 -> (値, rank, タグ名, コンテキストID)"""
-                    for tag in tag_names:
-                        best = None
+                    """優先順位が最も高いコンテキストの値 -> (値, rank, タグ名, コンテキストID, 名前空間)
+
+                    タグ候補を全部走査してから、コンテキストの優先度で最良を選ぶ。
+                    タグごとに打ち切ってはいけない。IFRS適用企業の有報には
+                    連結(jpigp_cor:AssetsIFRS)と個別(jppfs_cor:Assets)の両方が入っており、
+                    タグ単位で先に見つかった方を返すと、総資産だけ個別・純資産だけ連結、
+                    という混在が起きて貸借対照表の恒等式が壊れる。
+                    同じ優先度なら tag_names の並び順が先のものを採る。
+                    """
+                    best = None  # (rank, tag_order, val, ctx_id, prefix)
+                    for order, tag in enumerate(tag_names):
                         for el in soup.find_all(lambda e: e.name == tag):
                             ctx_id = el.get("contextRef") or ""
                             rank = ctx_ranks.get(ctx_id)
@@ -402,19 +417,19 @@ def fetch_xbrl_data(doc_id, sec_code):
                             val = parse_clean_amount(el)
                             if val is None:
                                 continue
-                            if best is None or rank < best[0]:
-                                best = (rank, val, ctx_id)
-                                if rank == 0:
-                                    break
-                        if best is not None:
-                            return best[1], best[0], tag, best[2]
-                    return None, None, None, None
+                            key = (rank, order)
+                            if best is None or key < (best[0], best[1]):
+                                best = (rank, order, val, ctx_id, el.prefix or "")
 
-                ca_val, ca_rank, ca_tag, ca_ctx = get_tag_value(TAGS_CURRENT_ASSETS)
-                tl_val, _, tl_tag, _ = get_tag_value(TAGS_TOTAL_LIABILITIES)
-                ta_val, _, ta_tag, ta_ctx = get_tag_value(TAGS_TOTAL_ASSETS)
-                eq_val, _, eq_tag, _ = get_tag_value(TAGS_EQUITY)
-                cash_val, _, _, _ = get_tag_value(TAGS_CASH)
+                    if best is None:
+                        return None, None, None, None, None
+                    return best[2], best[0], tag_names[best[1]], best[3], best[4]
+
+                ca_val, ca_rank, ca_tag, ca_ctx, ca_ns = get_tag_value(TAGS_CURRENT_ASSETS)
+                tl_val, _, tl_tag, _, tl_ns = get_tag_value(TAGS_TOTAL_LIABILITIES)
+                ta_val, _, ta_tag, ta_ctx, ta_ns = get_tag_value(TAGS_TOTAL_ASSETS)
+                eq_val, _, eq_tag, _, eq_ns = get_tag_value(TAGS_EQUITY)
+                cash_val, _, _, _, _ = get_tag_value(TAGS_CASH)
 
                 # 発行済株式数。取れなくても財務データ自体は使えるので、
                 # ここでの失敗は None を入れるだけにして書類は捨てない。
@@ -426,8 +441,10 @@ def fetch_xbrl_data(doc_id, sec_code):
                 # 貸借対照表の基準日。流動資産を採ったコンテキストを第一候補にする。
                 bs_date = ctx_instants.get(ca_ctx) or ctx_instants.get(ta_ctx) or ""
 
-                used_tags = [t for t in (ca_tag, tl_tag, ta_tag, eq_tag) if t]
-                accounting_std = "IFRS" if any(t.endswith("IFRS") for t in used_tags) else "J-GAAP"
+                # 会計基準は名前空間で判定する。jpigp_cor が IFRS、jppfs_cor が日本基準。
+                # 要素名の末尾が IFRS かどうかで見ると、命名規則から外れた要素を取り違える。
+                used_ns = [n for n in (ca_ns, tl_ns, ta_ns, eq_ns) if n]
+                accounting_std = "IFRS" if any("jpigp" in n for n in used_ns) else "J-GAAP"
 
                 # 連結・個別の判定
                 # 個別しか出していない会社には NonConsolidatedMember 自体が付かないため、
@@ -442,6 +459,18 @@ def fetch_xbrl_data(doc_id, sec_code):
                     return None
 
                 # 整合性チェック：科目の取り違えを検知して捨てる
+
+                # 4項目が同じ会計体系から取れているかを確認する。
+                # 連結(IFRS)と個別(日本基準)が混ざると、分子と分母が別物になり
+                # 自己資本比率も NCAV も無意味な値になる。
+                distinct_ns = {n for n in (ca_ns, tl_ns, ta_ns, eq_ns) if n}
+                if len(distinct_ns) > 1:
+                    logger.warning(
+                        f"[{sec_code}] 会計体系が混在しているため破棄 "
+                        f"(流動資産={ca_ns}, 負債={tl_ns}, 総資産={ta_ns}, 純資産={eq_ns})"
+                    )
+                    return None
+
                 if ca_val > ta_val * 1.05:
                     logger.warning(f"[{sec_code}] 流動資産 > 総資産 のため破棄 (ca={ca_val}, ta={ta_val})")
                     return None
@@ -489,6 +518,10 @@ def fetch_xbrl_data(doc_id, sec_code):
 def main():
     parser = argparse.ArgumentParser(description="EDINET Financial Cache Updater")
     parser.add_argument("--full", action="store_true", help="Run full scan for past 365 days of EDINET filings")
+    parser.add_argument("--repair", action="store_true",
+                        help="REPAIR_COLS が欠けている銘柄だけを再取得する（過去365日分を走査）")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="この回で取得する件数の上限（0 は無制限）。分割実行してタイムアウトを避ける用途。")
     args = parser.parse_args()
 
     logger.info("=== 財務キャッシュ更新処理を開始します ===")
@@ -550,6 +583,28 @@ def main():
         if col != "sec_code" and col not in df_cache.columns:
             df_cache[col] = pd.NA
 
+    # --repair: 値が欠けている行の doc_id を集める。
+    # 通常はここに挙がった書類も processed_docs.csv でスキップされてしまうため、
+    # 後段のスキップ判定でこの集合だけ例外扱いにする。
+    repair_doc_ids = set()
+    if args.repair:
+        mask = False
+        for col in REPAIR_COLS:
+            if col in df_cache.columns:
+                mask = mask | df_cache[col].isna()
+        if mask is not False:
+            repair_doc_ids = set(
+                df_cache.loc[mask, "doc_id"].dropna().astype(str).str.strip()
+            )
+        logger.info(
+            f"[repair] 欠損列 {REPAIR_COLS} の再取得対象: {len(repair_doc_ids)} 件"
+            "（うち過去365日以内に提出された書類のみ実際に再取得されます）"
+        )
+
+    for col in REPAIR_COLS:
+        if col in df_cache.columns:
+            logger.info(f"[充足状況/実行前] {col}: {int(df_cache[col].notna().sum())} / {len(df_cache)}")
+
     cached_doc_ids = set()
     if os.path.exists(PROCESSED_FILE):
         try:
@@ -565,8 +620,15 @@ def main():
     raw_targets = []
 
     today = datetime.now(JST)
-    scan_days = 365 if args.full else 5
-    logger.info(f"[モード: {'フルスキャン (過去365日分)' if args.full else '差分スキャン (過去5日分)'}] 書類一覧を検索中...")
+    wide_scan = args.full or args.repair
+    scan_days = 365 if wide_scan else 5
+    if args.repair:
+        mode_label = "欠損修復 (過去365日分)"
+    elif args.full:
+        mode_label = "フルスキャン (過去365日分)"
+    else:
+        mode_label = "差分スキャン (過去5日分)"
+    logger.info(f"[モード: {mode_label}] 書類一覧を検索中...")
 
     for i in range(scan_days):
         target_date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -581,16 +643,23 @@ def main():
     success_count = 0
     fail_count = 0
     skip_count = 0
+    repair_count = 0
     no_shares_count = 0
 
     for idx, doc in enumerate(unique_targets, 1):
+        if args.limit and (success_count + repair_count + fail_count) >= args.limit:
+            logger.info(f"[limit] 上限 {args.limit} 件に達したため打ち切ります（未処理は次回に持ち越し）。")
+            break
+
         sec_code = doc["sec_code"]
         doc_id = str(doc["doc_id"]).strip()
 
         if idx % 100 == 0 or idx == total_targets:
-            logger.info(f"⏳ 進捗: [{idx}/{total_targets}] (新規成功: {success_count}, 既処理スキップ: {skip_count}, 解析失敗: {fail_count})")
+            logger.info(f"⏳ 進捗: [{idx}/{total_targets}] (新規成功: {success_count}, 修復: {repair_count}, 既処理スキップ: {skip_count}, 解析失敗: {fail_count})")
 
-        if doc_id in cached_doc_ids:
+        is_repair_target = doc_id in repair_doc_ids
+
+        if doc_id in cached_doc_ids and not is_repair_target:
             skip_count += 1
             continue
 
@@ -622,7 +691,10 @@ def main():
                     "bs_date": fin["bs_date"]
                 }
                 cached_doc_ids.add(doc_id)
-                success_count += 1
+                if is_repair_target:
+                    repair_count += 1
+                else:
+                    success_count += 1
             else:
                 fail_count += 1
         except Exception as e:
@@ -631,11 +703,17 @@ def main():
 
         time.sleep(0.1)
 
-    logger.info(f"解析完了 - 新規取得: {success_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
-    if success_count:
+    logger.info(f"解析完了 - 新規取得: {success_count}件 / 修復: {repair_count}件 / スキップ: {skip_count}件 / 失敗: {fail_count}件")
+    if success_count or repair_count:
         logger.info(f"うち発行済株式数が取れなかった件数: {no_shares_count}件")
 
     df_new = df_new.reset_index()
+
+    # 修復後にどれだけ埋まったかをログに残す。次に何をすべきかの判断材料になる。
+    for col in REPAIR_COLS:
+        if col in df_new.columns:
+            filled = int(df_new[col].notna().sum())
+            logger.info(f"[充足状況/実行後] {col}: {filled} / {len(df_new)}")
 
     # 中身が同じでも、列構成が変わっていれば書き出す。
     # 新設列（bs_date など）を追加した直後に新規取得が0件だと、
