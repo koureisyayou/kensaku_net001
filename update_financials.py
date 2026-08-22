@@ -52,17 +52,48 @@ EDINET_API_KEY = os.environ.get("EDINET_API_KEY", "")
 TAGS_CURRENT_ASSETS = ["CurrentAssets", "CurrentAssetsIFRS", "AssetsCurrent"]
 TAGS_TOTAL_LIABILITIES = ["Liabilities", "LiabilitiesIFRS"]
 TAGS_TOTAL_ASSETS = ["Assets", "AssetsIFRS"]
-TAGS_EQUITY = [
-    "EquityAttributableToOwnersOfParentIFRS",
-    "NetAssets",
+# ------------------------------------------------------------------
+# 純資産は定義の異なる2系統を別々に取る。1つの列に混ぜてはいけない。
+#   total  : 非支配株主持分を含む「資本合計 / 純資産合計」
+#   parent : 親会社の所有者に帰属する分（非支配株主持分を除く）
+# 連結子会社を持たない会社では両者は一致する。
+# 自己資本比率としてはどちらの定義も一般に使われるため、両方を列で持ち、
+# どちらを既定の equity_value / equity_ratio にするかは EQUITY_BASIS で選ぶ。
+# ------------------------------------------------------------------
+TAGS_EQUITY_TOTAL = [
     "EquityIFRS",
-    "EquityAttributableToOwnersOfParent",
+    "NetAssets",
 ]
-TAGS_CASH = [
+TAGS_EQUITY_PARENT = [
+    "EquityAttributableToOwnersOfParentIFRS",
+    "EquityAttributableToOwnersOfParent",
+    "ShareholdersEquity",
+]
+
+# 既定値をどちらにするか。"parent" は非支配株主を除いた自己資本比率になる。
+# 下流（financials.py の妥当性チェック、run_screener.py の30%判定）は
+# equity_value / equity_ratio を見るので、ここを変えると候補が変わる。
+EQUITY_BASIS = "total"
+# ------------------------------------------------------------------
+# 現金も定義の異なる2系統を別々に取る。
+#   bs : 貸借対照表の「現金及び預金」。3か月超の定期預金を含む。
+#   cf : キャッシュフロー計算書の期末残高「現金及び現金同等物」。
+#        3か月超の定期預金を除き、代わりに満期3か月以内の短期投資を含む。
+# 同じ会社でも金額が一致しないため、1列に混ぜると比較できなくなる。
+# IFRS には日本基準の「現金及び預金」に相当する科目がないので、
+# IFRS企業では bs 側が空欄になる。
+# ------------------------------------------------------------------
+TAGS_CASH_BS = [
     "CashAndDeposits",
+]
+TAGS_CASH_CF = [
     "CashAndCashEquivalentsIFRS",
     "CashAndCashEquivalents",
 ]
+
+# 既定をどちらにするか。"bs" は日本基準のBS科目を優先し、
+# 無ければ cf で代替する（IFRS企業はこちらになる）。
+CASH_BASIS = "bs"
 
 # ------------------------------------------------------------------
 # 発行済株式数
@@ -428,8 +459,31 @@ def fetch_xbrl_data(doc_id, sec_code):
                 ca_val, ca_rank, ca_tag, ca_ctx, ca_ns = get_tag_value(TAGS_CURRENT_ASSETS)
                 tl_val, _, tl_tag, _, tl_ns = get_tag_value(TAGS_TOTAL_LIABILITIES)
                 ta_val, _, ta_tag, ta_ctx, ta_ns = get_tag_value(TAGS_TOTAL_ASSETS)
-                eq_val, _, eq_tag, _, eq_ns = get_tag_value(TAGS_EQUITY)
-                cash_val, _, _, _, _ = get_tag_value(TAGS_CASH)
+                eqt_val, _, eqt_tag, _, eqt_ns = get_tag_value(TAGS_EQUITY_TOTAL)
+                eqp_val, _, eqp_tag, _, eqp_ns = get_tag_value(TAGS_EQUITY_PARENT)
+
+                # 既定として使う方を選ぶ。片方しか取れない書類もあるので、
+                # 指定した方が欠けていればもう一方で代替する。
+                if EQUITY_BASIS == "parent":
+                    eq_val, eq_tag, eq_ns = eqp_val, eqp_tag, eqp_ns
+                    if eq_val is None:
+                        eq_val, eq_tag, eq_ns = eqt_val, eqt_tag, eqt_ns
+                else:
+                    eq_val, eq_tag, eq_ns = eqt_val, eqt_tag, eqt_ns
+                    if eq_val is None:
+                        eq_val, eq_tag, eq_ns = eqp_val, eqp_tag, eqp_ns
+                cash_bs_val, _, cash_bs_tag, _, cash_bs_ns = get_tag_value(TAGS_CASH_BS)
+                cash_cf_val, _, cash_cf_tag, _, cash_cf_ns = get_tag_value(TAGS_CASH_CF)
+
+                # 既定として使う方を選ぶ。指定した方が欠ければもう一方で代替する。
+                if CASH_BASIS == "cf":
+                    cash_val, cash_tag, cash_ns = cash_cf_val, cash_cf_tag, cash_cf_ns
+                    if cash_val is None:
+                        cash_val, cash_tag, cash_ns = cash_bs_val, cash_bs_tag, cash_bs_ns
+                else:
+                    cash_val, cash_tag, cash_ns = cash_bs_val, cash_bs_tag, cash_bs_ns
+                    if cash_val is None:
+                        cash_val, cash_tag, cash_ns = cash_cf_val, cash_cf_tag, cash_cf_ns
 
                 # 発行済株式数。取れなくても財務データ自体は使えるので、
                 # ここでの失敗は None を入れるだけにして書類は捨てない。
@@ -446,10 +500,13 @@ def fetch_xbrl_data(doc_id, sec_code):
                 used_ns = [n for n in (ca_ns, tl_ns, ta_ns, eq_ns) if n]
                 accounting_std = "IFRS" if any("jpigp" in n for n in used_ns) else "J-GAAP"
 
-                # 連結・個別の判定
-                # 個別しか出していない会社には NonConsolidatedMember 自体が付かないため、
-                # 「NonConsolidated コンテキストが存在する会社の、ディメンション無しの値」を連結とみなす。
-                consolidated = bool(has_nonconsolidated) and ca_rank is not None and ca_rank <= 1
+                # 連結・個別の判定。
+                # 推測ではなく、実際に値を採用したコンテキストで判定する。
+                # NonConsolidatedMember 付きなら個別、無ければ連結。
+                # 個別しか出していない会社は NonConsolidatedMember 自体が付かないので、
+                # 連結を出しているか（has_nonconsolidated）と併せて見る。
+                ctx_is_nonconsolidated = "NonConsolidated" in (ca_ctx or "")
+                consolidated = bool(has_nonconsolidated) and not ctx_is_nonconsolidated
 
                 soup.decompose()
 
@@ -470,6 +527,24 @@ def fetch_xbrl_data(doc_id, sec_code):
                         f"(流動資産={ca_ns}, 負債={tl_ns}, 総資産={ta_ns}, 純資産={eq_ns})"
                     )
                     return None
+
+                # 現金だけ別体系から拾われた場合は、値を捨てて書類自体は残す。
+                # net_cash（現金 - 総負債）で個別の現金と連結の負債を引き算すると
+                # 意味のない数字になるため、混ぜるくらいなら欠損にする。
+                base_ns = next(iter(distinct_ns), None)
+
+                def drop_if_mixed(val, ns, tag, label):
+                    if val is not None and base_ns and ns and ns != base_ns:
+                        logger.info(
+                            f"[{sec_code}] {label}の会計体系が本体と異なるため破棄 "
+                            f"({ns}:{tag}, 本体={base_ns})"
+                        )
+                        return None
+                    return val
+
+                cash_bs_val = drop_if_mixed(cash_bs_val, cash_bs_ns, cash_bs_tag, "現金(BS)")
+                cash_cf_val = drop_if_mixed(cash_cf_val, cash_cf_ns, cash_cf_tag, "現金(CF)")
+                cash_val = drop_if_mixed(cash_val, cash_ns, cash_tag, "現金")
 
                 if ca_val > ta_val * 1.05:
                     logger.warning(f"[{sec_code}] 流動資産 > 総資産 のため破棄 (ca={ca_val}, ta={ta_val})")
@@ -493,6 +568,9 @@ def fetch_xbrl_data(doc_id, sec_code):
                 # 自己資本比率は「％」で保存する（下流で単位を推測しないため）
                 equity_ratio = round(eq_val / ta_val * 100.0, 2)
 
+                def ratio(v):
+                    return round(v / ta_val * 100.0, 2) if v is not None else None
+
                 return {
                     "current_assets": ca_val,
                     "total_liabilities": tl_val,
@@ -500,7 +578,17 @@ def fetch_xbrl_data(doc_id, sec_code):
                     "equity_value": eq_val,
                     "equity_type": eq_tag or "Unknown",
                     "equity_ratio": equity_ratio,
+                    "equity_basis": EQUITY_BASIS,
+                    "equity_total": eqt_val,
+                    "equity_total_type": eqt_tag or "",
+                    "equity_ratio_total": ratio(eqt_val),
+                    "equity_parent": eqp_val,
+                    "equity_parent_type": eqp_tag or "",
+                    "equity_ratio_parent": ratio(eqp_val),
                     "cash_and_equivalents": cash_val,
+                    "cash_basis": CASH_BASIS if cash_val is not None else "",
+                    "cash_bs": cash_bs_val,
+                    "cash_cf": cash_cf_val,
                     "shares_outstanding": shares_val,
                     "shares_as_of": shares_as_of,
                     "shares_source": shares_tag,
@@ -533,7 +621,10 @@ def main():
     columns = [
         "sec_code", "filer_name", "current_assets", "total_liabilities",
         "total_assets", "equity_value", "equity_type", "equity_ratio",
-        "cash_and_equivalents", "shares_outstanding", "shares_as_of",
+        "equity_basis", "equity_total", "equity_total_type", "equity_ratio_total",
+        "equity_parent", "equity_parent_type", "equity_ratio_parent",
+        "cash_and_equivalents", "cash_basis", "cash_bs", "cash_cf",
+        "shares_outstanding", "shares_as_of",
         "shares_source", "doc_id", "submit_date", "doc_type",
         "accounting_standard", "consolidated", "fiscal_period", "bs_date"
     ]
@@ -542,6 +633,10 @@ def main():
         "sec_code": "string",
         "filer_name": "string",
         "equity_type": "string",
+        "equity_basis": "string",
+        "equity_total_type": "string",
+        "equity_parent_type": "string",
+        "cash_basis": "string",
         "shares_as_of": "string",
         "shares_source": "string",
         "doc_id": "string",
@@ -555,7 +650,10 @@ def main():
 
     NUMERIC_COLS = [
         "current_assets", "total_liabilities", "total_assets",
-        "equity_value", "equity_ratio", "cash_and_equivalents",
+        "equity_value", "equity_ratio",
+        "equity_total", "equity_ratio_total",
+        "equity_parent", "equity_ratio_parent",
+        "cash_and_equivalents", "cash_bs", "cash_cf",
         "shares_outstanding"
     ]
 
@@ -678,7 +776,17 @@ def main():
                     "equity_value": fin["equity_value"],
                     "equity_type": fin["equity_type"],
                     "equity_ratio": fin["equity_ratio"],
+                    "equity_basis": fin["equity_basis"],
+                    "equity_total": fin["equity_total"],
+                    "equity_total_type": fin["equity_total_type"],
+                    "equity_ratio_total": fin["equity_ratio_total"],
+                    "equity_parent": fin["equity_parent"],
+                    "equity_parent_type": fin["equity_parent_type"],
+                    "equity_ratio_parent": fin["equity_ratio_parent"],
                     "cash_and_equivalents": fin["cash_and_equivalents"],
+                    "cash_basis": fin["cash_basis"],
+                    "cash_bs": fin["cash_bs"],
+                    "cash_cf": fin["cash_cf"],
                     "shares_outstanding": fin["shares_outstanding"],
                     "shares_as_of": fin["shares_as_of"],
                     "shares_source": fin["shares_source"],
