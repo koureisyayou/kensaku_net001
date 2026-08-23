@@ -16,6 +16,10 @@ on:
         type: boolean
         description: '財務キャッシュを破棄してゼロから作り直しますか？（処理済みリストも消すため数時間かかります）'
         default: false
+      repair:
+        type: boolean
+        description: 'REPAIR_COLS が欠けている銘柄だけ再取得しますか？'
+        default: false
 
 permissions:
   contents: write
@@ -55,11 +59,14 @@ jobs:
           echo "Discarding financial_cache.csv and processed_docs.csv ..."
           rm -f financial_cache.csv processed_docs.csv
 
-      - name: 財務キャッシュの更新 (日次 vs フルスキャン判定)
+      - name: 財務キャッシュの更新 (日次 / フルスキャン / 欠損修復)
         env:
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
-          if [ "${{ github.event.inputs.full_scan }}" = "true" ] \
+          if [ "${{ github.event.inputs.repair }}" = "true" ]; then
+            echo "Running REPAIR mode..."
+            python update_financials.py --repair
+          elif [ "${{ github.event.inputs.full_scan }}" = "true" ] \
             || [ "${{ github.event.inputs.rebuild }}" = "true" ] \
             || [ "${{ github.event.schedule }}" = "0 15 * * 5" ]; then
             echo "Running FULL SCAN mode..."
