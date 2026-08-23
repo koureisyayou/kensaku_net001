@@ -26,7 +26,7 @@ AMENDMENT_TYPES = {"130", "150", "170"}
 # 永久に埋まらない。その穴を埋め直すための仕組み。
 # ※ shares_outstanding は元々取得できない書類が一定数あるので、
 #   一度埋め直したらこのリストから外す方が無駄な再取得を防げる。
-REPAIR_COLS = ["bs_date", "shares_outstanding"]
+REPAIR_COLS = ["cash_and_equivalents"]
 
 # ログ設定
 logging.basicConfig(
