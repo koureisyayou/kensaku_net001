@@ -10,7 +10,7 @@
 
 出力されるもの:
     1) 名前空間ごとの要素数（jppfs_cor=日本基準 / jpigp_cor=IFRS のどちらが入っているか）
-    2) 資産・負債・純資産系のタグを、名前空間・値・コンテキスト付きで全部列挙
+    2) 資産・負債・純資産・現金系のタグを、名前空間・値・コンテキスト付きで全部列挙
     3) いま update_financials.py が採用するはずの値（同じロジックを再現）
 """
 
@@ -31,17 +31,21 @@ EDINET_API_KEY = os.environ.get("EDINET_API_KEY", "")
 TAGS_CURRENT_ASSETS = ["CurrentAssets", "CurrentAssetsIFRS", "AssetsCurrent"]
 TAGS_TOTAL_LIABILITIES = ["Liabilities", "LiabilitiesIFRS"]
 TAGS_TOTAL_ASSETS = ["Assets", "AssetsIFRS"]
-TAGS_EQUITY = [
+TAGS_EQUITY_TOTAL = ["EquityIFRS", "NetAssets"]
+TAGS_EQUITY_PARENT = [
     "EquityAttributableToOwnersOfParentIFRS",
-    "NetAssets",
-    "EquityIFRS",
     "EquityAttributableToOwnersOfParent",
+    "ShareholdersEquity",
 ]
+TAGS_CASH_BS = ["CashAndDeposits"]
+TAGS_CASH_CF = ["CashAndCashEquivalentsIFRS", "CashAndCashEquivalents"]
 
 # 表示対象にする要素名。前方一致で拾う。
+# Cash を入れているのは、IFRS企業で現金がどの要素名で出ているかを探すため。
 INTERESTING_PREFIXES = (
     "Assets", "Liabilities", "NetAssets", "Equity",
     "CurrentAssets", "CurrentLiabilities",
+    "Cash",
 )
 
 
@@ -175,8 +179,8 @@ def inspect(sec_code, days):
             note = "  ← IFRS"
         print(f"  {p:20s} {c:6d}{note}")
 
-    # --- 2) 資産・負債・純資産系のタグを全部出す -----------------------
-    print("\n--- 資産・負債・純資産系タグの一覧 ---")
+    # --- 2) 資産・負債・純資産・現金系のタグを全部出す -----------------
+    print("\n--- 資産・負債・純資産・現金系タグの一覧 ---")
     print("  （同じ項目が名前空間違いで複数あるかを見る）")
     rows = []
     for el in soup.find_all(True):
@@ -223,8 +227,9 @@ def inspect(sec_code, days):
             ranks[cid] = 2 if cy else 3
 
     def pick(tag_names):
-        for tag in tag_names:
-            best = None
+        """本体の get_tag_value と同じく、全候補を走査してからランクで選ぶ。"""
+        best = None  # (rank, order, val, ctx, prefix)
+        for order, tag in enumerate(tag_names):
             for el in soup.find_all(lambda e: e.name == tag):
                 cid = el.get("contextRef") or ""
                 r = ranks.get(cid)
@@ -233,38 +238,52 @@ def inspect(sec_code, days):
                 v = amount(el)
                 if v is None:
                     continue
-                if best is None or r < best[0]:
-                    best = (r, v, cid, el.prefix or "")
-            if best is not None:
-                return tag, best[1], best[2], best[3]
-        return None, None, None, None
+                if best is None or (r, order) < (best[0], best[1]):
+                    best = (r, order, v, cid, el.prefix or "")
+        if best is None:
+            return None, None, None, None
+        return tag_names[best[1]], best[2], best[3], best[4]
 
     picked = {}
     for label, tags in (("流動資産", TAGS_CURRENT_ASSETS),
                         ("総負債", TAGS_TOTAL_LIABILITIES),
                         ("総資産", TAGS_TOTAL_ASSETS),
-                        ("純資産", TAGS_EQUITY)):
+                        ("純資産(total)", TAGS_EQUITY_TOTAL),
+                        ("純資産(parent)", TAGS_EQUITY_PARENT),
+                        ("現金(BS)", TAGS_CASH_BS),
+                        ("現金(CF)", TAGS_CASH_CF)):
         tag, v, ctx, pfx = pick(tags)
         picked[label] = (pfx, v)
         if tag is None:
-            print(f"  {label:<6} 取得できず")
+            print(f"  {label:<14} 取得できず")
         else:
-            print(f"  {label:<6} {pfx}:{tag}  = {fmt(v)}   ctx={ctx}")
+            print(f"  {label:<14} {pfx}:{tag}  = {fmt(v)}   ctx={ctx}")
 
     # --- 4) 判定 --------------------------------------------------------
     print("\n--- 判定 ---")
-    prefixes = {lbl: p for lbl, (p, v) in picked.items() if p}
+    core = ["流動資産", "総負債", "総資産", "純資産(total)"]
+    prefixes = {lbl: picked[lbl][0] for lbl in core if picked.get(lbl, (None,))[0]}
     uniq = set(prefixes.values())
     if len(uniq) > 1:
-        print(f"  ⚠ 名前空間が混在しています: {prefixes}")
-        print("    → 分子と分母が別の会計体系から取られています（これが不整合の原因）")
+        print(f"  ⚠ 本体4項目の名前空間が混在: {prefixes}")
     elif uniq:
-        print(f"  名前空間は統一されています: {uniq.pop()}")
+        base = uniq.pop()
+        print(f"  本体4項目の名前空間は統一: {base}")
+
+        # 現金が本体と揃うかどうか。ここが揃わないと net_cash が計算できない。
+        for lbl in ("現金(BS)", "現金(CF)"):
+            ns, val = picked.get(lbl, (None, None))
+            if val is None:
+                print(f"  {lbl}: 取得できず")
+            elif ns != base:
+                print(f"  ⚠ {lbl}: 体系が本体と異なる ({ns} != {base}) → 破棄される")
+            else:
+                print(f"  {lbl}: 本体と同じ体系 ({ns}) → 採用される")
 
     ta = picked.get("総資産", (None, None))[1]
-    eq = picked.get("純資産", (None, None))[1]
+    eq = picked.get("純資産(total)", (None, None))[1]
     if ta and eq and eq > ta:
-        print(f"  ⚠ 純資産({fmt(eq)}) > 総資産({fmt(ta)}) — この書類は現行ロジックで破棄されます")
+        print(f"  ⚠ 純資産({fmt(eq)}) > 総資産({fmt(ta)}) — この書類は破棄されます")
 
     soup.decompose()
     print()
