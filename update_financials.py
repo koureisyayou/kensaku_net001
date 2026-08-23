@@ -472,18 +472,11 @@ def fetch_xbrl_data(doc_id, sec_code):
                     eq_val, eq_tag, eq_ns = eqt_val, eqt_tag, eqt_ns
                     if eq_val is None:
                         eq_val, eq_tag, eq_ns = eqp_val, eqp_tag, eqp_ns
+                        
+                # 現金は2系統とも取るだけにして、既定値の選択はここでは行わない。
+                # 本体の会計体系が確定してから、体系の合う方を選ぶ（後述）。
                 cash_bs_val, _, cash_bs_tag, _, cash_bs_ns = get_tag_value(TAGS_CASH_BS)
                 cash_cf_val, _, cash_cf_tag, _, cash_cf_ns = get_tag_value(TAGS_CASH_CF)
-
-                # 既定として使う方を選ぶ。指定した方が欠ければもう一方で代替する。
-                if CASH_BASIS == "cf":
-                    cash_val, cash_tag, cash_ns = cash_cf_val, cash_cf_tag, cash_cf_ns
-                    if cash_val is None:
-                        cash_val, cash_tag, cash_ns = cash_bs_val, cash_bs_tag, cash_bs_ns
-                else:
-                    cash_val, cash_tag, cash_ns = cash_bs_val, cash_bs_tag, cash_bs_ns
-                    if cash_val is None:
-                        cash_val, cash_tag, cash_ns = cash_cf_val, cash_cf_tag, cash_cf_ns
 
                 # 発行済株式数。取れなくても財務データ自体は使えるので、
                 # ここでの失敗は None を入れるだけにして書類は捨てない。
@@ -544,7 +537,22 @@ def fetch_xbrl_data(doc_id, sec_code):
 
                 cash_bs_val = drop_if_mixed(cash_bs_val, cash_bs_ns, cash_bs_tag, "現金(BS)")
                 cash_cf_val = drop_if_mixed(cash_cf_val, cash_cf_ns, cash_cf_tag, "現金(CF)")
-                cash_val = drop_if_mixed(cash_val, cash_ns, cash_tag, "現金")
+
+                # 体系が確定してから既定値を選ぶ。
+                # IFRSの連結貸借対照表に「現金及び預金」は存在せず、載るのは
+                # 「現金及び現金同等物」だけなので、CASH_BASIS="bs" のままだと
+                # IFRS企業では必ず空振りする。体系不一致で捨てた後の値を対象に
+                # 選び直すことで、bs が使えない書類は自動的に cf に落ちる。
+                if CASH_BASIS == "cf":
+                    order = ((cash_cf_val, "cf"), (cash_bs_val, "bs"))
+                else:
+                    order = ((cash_bs_val, "bs"), (cash_cf_val, "cf"))
+
+                cash_val, cash_basis = None, ""
+                for val, basis in order:
+                    if val is not None:
+                        cash_val, cash_basis = val, basis
+                        break
 
                 if ca_val > ta_val * 1.05:
                     logger.warning(f"[{sec_code}] 流動資産 > 総資産 のため破棄 (ca={ca_val}, ta={ta_val})")
@@ -586,7 +594,7 @@ def fetch_xbrl_data(doc_id, sec_code):
                     "equity_parent_type": eqp_tag or "",
                     "equity_ratio_parent": ratio(eqp_val),
                     "cash_and_equivalents": cash_val,
-                    "cash_basis": CASH_BASIS if cash_val is not None else "",
+                    "cash_basis": cash_basis,
                     "cash_bs": cash_bs_val,
                     "cash_cf": cash_cf_val,
                     "shares_outstanding": shares_val,
