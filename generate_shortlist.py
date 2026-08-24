@@ -13,13 +13,18 @@ net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格�
 
 除外せず列・バッジで出すもの:
     NCAV倍率が高すぎる銘柄／決算日・提出日からの経過日数／
-    安値乖離・騰落率・停滞日数
+    安値乖離・騰落率・停滞日数／長期高安（yearly_high_low.csv）
 
 データの鮮度について:
     決算日経過は bs_date（XBRLコンテキストの instant = 貸借対照表の基準日）を使う。
     fiscal_period は EDINET の periodEnd で、会計年度末を指すため半期報告書では
     未来日が入る。よって fiscal_period は「過去日のときだけ」代用する。
     bs_date は新規取得分から順に埋まるので、当面は提出日経過が実用的な目安になる。
+
+長期高安について:
+    yearly_high_low.py が貯めた暦年ごとの高値・安値から、期間全体の高値・安値と
+    現在値のレンジ内位置を出す。0%が期間最安値、100%が期間最高値。
+    年別の推移は銘柄名のツールチップ（title属性）に入れている。
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from jpx_alerts import fetch_alerts
 
 CANDIDATES_CSV = Path("net_net_candidates.csv")
 HISTORY_CSV = Path("screening_history.csv")
+YEARLY_CSV = Path("yearly_high_low.csv")
 OUTPUT_HTML = Path("shortlist.html")
 
 EXCLUDE_KANRI = True
@@ -47,6 +53,8 @@ MAX_STREAK_DAYS = 250       # 営業日
 RATIO_FLAG_ABOVE = 5.0      # NCAV倍率がこれ超で「要確認」
 STALE_DATA_DAYS = 120       # 決算日経過がこれ以上で強調
 NEW_ENTRY_DAYS = 5          # 連続掲載日数がこれ以下で「新規」
+RANGE_LOW_PCT = 10.0        # レンジ内位置がこれ以下なら強調（期間最安値圏）
+YEARS_IN_TOOLTIP = 10       # ツールチップに載せる年数
 
 OKU = 1e8                   # 円 → 億円
 JST = ZoneInfo("Asia/Tokyo")
@@ -117,6 +125,50 @@ def load_streaks(path: Path, code_col_hint: str) -> dict[str, int]:
     return streaks
 
 
+# --------------------------------------------------------- 長期の高値・安値
+
+def load_yearly(path: Path) -> dict[str, dict]:
+    """yearly_high_low.csv を銘柄ごとに畳んで返す。
+
+    戻り値は sec_code -> {"high":期間高値, "low":期間安値, "years":年数, "text":年別推移}
+    text は "2026:875/684 | 2025:1,150/856" のような表示用文字列（新しい年が先）。
+    """
+    if not path.exists():
+        print(f"[shortlist] {path} が無いため長期高安の列は空欄になります。")
+        return {}
+
+    try:
+        df = pd.read_csv(path, dtype={"sec_code": str})
+    except Exception as e:
+        print(f"[shortlist] {path} を読めませんでした: {e}")
+        return {}
+
+    for col in ("high", "low", "year"):
+        if col not in df.columns:
+            print(f"[shortlist] {path} に {col} 列がありません。")
+            return {}
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["high", "low", "year"])
+    if df.empty:
+        return {}
+
+    out: dict[str, dict] = {}
+    for code, part in df.groupby(df["sec_code"].astype(str).str.strip()):
+        part = part.sort_values("year", ascending=False)
+        rows = part.head(YEARS_IN_TOOLTIP)
+        text = " | ".join(
+            f"{int(r.year)}: {r.high:,.0f} / {r.low:,.0f}" for r in rows.itertuples()
+        )
+        out[code] = {
+            "high": float(part["high"].max()),
+            "low": float(part["low"].min()),
+            "years": int(part["year"].nunique()),
+            "text": text,
+        }
+    print(f"[shortlist] 長期高安: {len(out)} 銘柄を読み込みました。")
+    return out
+
+
 # ------------------------------------------------------------- 絞り込み
 
 def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int]], pd.DataFrame, str]:
@@ -132,6 +184,23 @@ def build_shortlist(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, int
 
     # 連続掲載日数
     work["連続掲載日数"] = work[code_col].map(load_streaks(HISTORY_CSV, code_col))
+
+    # --- 長期の高値・安値 ---
+    # 現在値は price ではなく調整後終値を使う。yearly 側が auto_adjust=True で
+    # 分割調整済みのため、未調整の株価と比べるとレンジ内位置がずれる。
+    yearly = load_yearly(YEARLY_CSV)
+    ref_price = (to_number(work["調整後終値"])
+                 if "調整後終値" in work.columns else work["_株価"])
+
+    work["_長期高値"] = work[code_col].map(lambda c: yearly.get(c, {}).get("high"))
+    work["_長期安値"] = work[code_col].map(lambda c: yearly.get(c, {}).get("low"))
+    work["_長期年数"] = work[code_col].map(lambda c: yearly.get(c, {}).get("years"))
+    work["_年別推移"] = work[code_col].map(lambda c: yearly.get(c, {}).get("text", ""))
+
+    span = work["_長期高値"] - work["_長期安値"]
+    work["_レンジ内位置"] = (
+        (ref_price - work["_長期安値"]) / span.where(span > 0) * 100
+    ).round(1)
 
     # --- データの鮮度 ---
     today = pd.Timestamp.now().normalize()
@@ -236,11 +305,17 @@ tbody tr:nth-child(even){background:#f5f6f8}
 tbody tr:hover{background:#e8eef4}
 td.num{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
 td.stale{color:var(--alert);font-weight:600}
+td.lowrange{color:var(--moss);font-weight:600}
 .badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:2px;
   font-size:10px;letter-spacing:.04em;color:#fff}
 .badge.new{background:var(--moss)}
 .badge.check{background:var(--amber)}
 .pos{color:var(--amber)}.neg{color:var(--indigo)}
+/* 年別高安を持つ銘柄名。マウスオーバーで推移が出ることを点線で示す */
+.hasyears{border-bottom:1px dotted var(--muted);cursor:help}
+.years{display:none;margin-top:4px;font-family:ui-monospace,Menlo,monospace;
+  font-size:11px;color:var(--muted);white-space:normal;line-height:1.5}
+tr.open .years{display:block}
 footer{margin-top:20px;font-size:11px;color:var(--muted)}
 @media(max-width:600px){.wrap{padding:20px 12px 48px}.funnel .num{font-size:18px}}
 """
@@ -259,6 +334,14 @@ document.querySelectorAll('thead th').forEach((th, idx) => {
       const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv), 'ja');
       return desc ? -cmp : cmp;
     }).forEach(r => tbody.appendChild(r));
+  });
+});
+
+// 銘柄名をタップ/クリックすると年別高安を開閉する。
+// title属性のツールチップはスマートフォンで出ないため、こちらを併設している。
+document.querySelectorAll('.hasyears').forEach(el => {
+  el.addEventListener('click', () => {
+    el.closest('tr').classList.toggle('open');
   });
 });
 """
@@ -291,11 +374,14 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
         ("提出日経過", "提出日経過", "{:,.0f}", False),
         ("60日安値乖離%", resolve(df, "low60"), "{:,.1f}", True),
         ("5日騰落%", resolve(df, "ret5"), "{:,.1f}", True),
+        ("長期高値", "_長期高値", "{:,.0f}", False),
+        ("長期安値", "_長期安値", "{:,.0f}", False),
+        ("レンジ内位置%", "_レンジ内位置", "{:,.1f}", False),
         ("停滞日数", resolve(df, "stagnant"), "{:,.0f}", False),
         ("売買代金(百万)", resolve(df, "turnover"), "{:,.1f}", False),
         ("連続掲載日数", "連続掲載日数", "{:,.0f}", False),
     ]
-    cols = [c for c in cols if c[1] is not None]
+    cols = [c for c in cols if c[1] is not None and c[1] in df.columns]
     head = "<th>コード</th><th>銘柄名</th>" + "".join(f"<th>{html.escape(l)}</th>" for l, *_ in cols)
 
     rows = []
@@ -308,9 +394,20 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
         if pd.notna(ratio) and ratio > RATIO_FLAG_ABOVE:
             badges += '<span class="badge check">要確認</span>'
 
+        # 銘柄名。年別高安があれば title と展開領域を付ける。
+        name_text = html.escape(str(row[name_col]))
+        years_text = str(row.get("_年別推移") or "")
+        if years_text:
+            span = int(row.get("_長期年数") or 0)
+            tip = html.escape(f"年別 高値/安値（{span}年分）: {years_text}")
+            name_html = (f'<span class="hasyears" title="{tip}">{name_text}</span>'
+                         f'{badges}<div class="years">{html.escape(years_text)}</div>')
+        else:
+            name_html = f"{name_text}{badges}"
+
         tds = [
             f'<td>{html.escape(str(row[code_col]))}</td>',
-            f'<td>{html.escape(str(row[name_col]))}{badges}</td>',
+            f'<td>{name_html}</td>',
         ]
         for label, col, fmt, signed in cols:
             value = row.get(col)
@@ -318,6 +415,12 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
             if label in ("決算日経過", "提出日経過") and pd.notna(value) and value != "":
                 try:
                     extra = "stale" if float(value) >= STALE_DATA_DAYS else ""
+                except (TypeError, ValueError):
+                    extra = ""
+            elif label == "レンジ内位置%" and pd.notna(value) and value != "":
+                # 期間最安値圏にいる銘柄を目立たせる（強調のみ。除外はしない）
+                try:
+                    extra = "lowrange" if float(value) <= RANGE_LOW_PCT else ""
                 except (TypeError, ValueError):
                     extra = ""
             tds.append(cell(value, fmt, signed, extra))
@@ -368,6 +471,7 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
     整理・監理：JPX公表の指定状況と突合　/　株価 {MIN_PRICE:.0f}円以上　/　時価総額 {MIN_MCAP_OKU:.0f}億円以上　/　
     20日平均売買代金 {MIN_TURNOVER_MYEN:.0f}百万円以上　/　連続掲載 {MAX_STREAK_DAYS}営業日以下。
     NCAV倍率 {RATIO_FLAG_ABOVE:.0f}倍超は除外せず「要確認」を付けています。列見出しをクリックすると並べ替わります。
+    銘柄名をクリックすると年別の高値・安値が開きます。
   </p>
   {alert_html}
 
@@ -381,6 +485,8 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
   <footer>
     決算日経過は貸借対照表の基準日からの日数です。空欄の銘柄は基準日が未取得で、提出日経過を目安にしてください。
     経過が長い銘柄は、期末以降の構造変化がNCAVに反映されていない可能性があります。
+    長期高値・安値は分割調整後の値で、蓄積できている年数は銘柄ごとに異なります（上場が新しい銘柄ほど短い）。
+    レンジ内位置は 0% が期間最安値、100% が期間最高値。{RANGE_LOW_PCT:.0f}%以下を緑字にしています。
     数値は自動取得したもので正確性を保証しません。
   </footer>
 </div>
