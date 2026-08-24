@@ -54,6 +54,7 @@ RATIO_FLAG_ABOVE = 5.0      # NCAV倍率がこれ超で「要確認」
 STALE_DATA_DAYS = 120       # 決算日経過がこれ以上で強調
 NEW_ENTRY_DAYS = 5          # 連続掲載日数がこれ以下で「新規」
 RANGE_LOW_PCT = 10.0        # レンジ内位置がこれ以下なら強調（期間最安値圏）
+SHORT_HISTORY_YEARS = 5     # 蓄積年数がこれ未満なら注意色（他銘柄と同列に読めない）
 YEARS_IN_TOOLTIP = 10       # ツールチップに載せる年数
 
 OKU = 1e8                   # 円 → 億円
@@ -306,6 +307,7 @@ tbody tr:hover{background:#e8eef4}
 td.num{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
 td.stale{color:var(--alert);font-weight:600}
 td.lowrange{color:var(--moss);font-weight:600}
+td.shorthist{color:var(--amber);font-weight:600}
 .badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:2px;
   font-size:10px;letter-spacing:.04em;color:#fff}
 .badge.new{background:var(--moss)}
@@ -377,6 +379,7 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
         ("長期高値", "_長期高値", "{:,.0f}", False),
         ("長期安値", "_長期安値", "{:,.0f}", False),
         ("レンジ内位置%", "_レンジ内位置", "{:,.1f}", False),
+        ("蓄積年数", "_長期年数", "{:,.0f}", False),
         ("停滞日数", resolve(df, "stagnant"), "{:,.0f}", False),
         ("売買代金(百万)", resolve(df, "turnover"), "{:,.1f}", False),
         ("連続掲載日数", "連続掲載日数", "{:,.0f}", False),
@@ -421,6 +424,13 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
                 # 期間最安値圏にいる銘柄を目立たせる（強調のみ。除外はしない）
                 try:
                     extra = "lowrange" if float(value) <= RANGE_LOW_PCT else ""
+                except (TypeError, ValueError):
+                    extra = ""
+            elif label == "蓄積年数" and pd.notna(value) and value != "":
+                # 年数が短い銘柄のレンジ内位置は、11年分の銘柄と同じ意味では読めない。
+                # 除外はせず、数字が短いことだけ分かるようにする。
+                try:
+                    extra = "shorthist" if float(value) < SHORT_HISTORY_YEARS else ""
                 except (TypeError, ValueError):
                     extra = ""
             tds.append(cell(value, fmt, signed, extra))
@@ -487,6 +497,8 @@ def render(df: pd.DataFrame, stages: list[tuple[str, int]], flagged: pd.DataFram
     経過が長い銘柄は、期末以降の構造変化がNCAVに反映されていない可能性があります。
     長期高値・安値は分割調整後の値で、蓄積できている年数は銘柄ごとに異なります（上場が新しい銘柄ほど短い）。
     レンジ内位置は 0% が期間最安値、100% が期間最高値。{RANGE_LOW_PCT:.0f}%以下を緑字にしています。
+    蓄積年数は長期高安を何年分そろえられたかで、{SHORT_HISTORY_YEARS}年未満は橙字にしています。
+    年数が短い銘柄のレンジ内位置は、10年超の銘柄と同じ意味では読めません。
     数値は自動取得したもので正確性を保証しません。
   </footer>
 </div>
