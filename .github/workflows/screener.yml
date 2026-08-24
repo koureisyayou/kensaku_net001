@@ -87,9 +87,10 @@ jobs:
       # 衝突して pipeline 全体が止まるため、リモートの最新に合わせたうえで
       # 今回の生成物を上書きする方式にしている。
       #
-      # 累積ファイル（screening_history.csv / local_price_history.csv）は
-      # 退避対象から外してリモート側を採用する。これらへ追記する処理は、
-      # このステップより後に置くこと。前で実行すると reset で消える。
+      # 累積ファイル（screening_history.csv / local_price_history.csv /
+      # yearly_high_low.csv）は退避対象から外してリモート側を採用する。
+      # これらへ追記する処理は、このステップより後に置くこと。
+      # 前で実行すると reset で消える。
       # ------------------------------------------------------------------
       - name: リモートの最新状態に追従（生成物は今回の結果を採用）
         run: |
@@ -114,11 +115,19 @@ jobs:
           echo "--- 追従後の累積ファイル ---"
           wc -l screening_history.csv 2>/dev/null || echo "screening_history.csv なし"
           wc -l local_price_history.csv 2>/dev/null || echo "local_price_history.csv なし"
+          wc -l yearly_high_low.csv 2>/dev/null || echo "yearly_high_low.csv なし"
 
       # 履歴の追記はリモート最新を取り込んだ後に行う。
       # 同日同銘柄は save_history.py 側で重複排除される。
       - name: 履歴データの追記保存
         run: python save_history.py
+
+      # 年別の高値・安値を蓄積する。過去の年は確定値なので取り直さない。
+      # 未取得の銘柄だけ10年分を取り、取得済みは当年の行だけ更新する。
+      # これも累積ファイルなので、必ずリモート追従より後に実行する。
+      - name: 年別高安の蓄積
+        continue-on-error: true
+        run: python yearly_high_low.py
 
       # 名証の相場表PDFを取得し local_price_history.csv に追記する。
       # これも累積ファイルなので、必ずリモート追従より後に実行する。
@@ -193,7 +202,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chrono: auto-update financial cache, screening history and pages [skip ci]"
-          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv local_price_history.csv local_prices.csv tse_listed.csv net_net_candidates_local.csv CONTEXT.md index.html shortlist.html local.html'
+          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv local_price_history.csv local_prices.csv tse_listed.csv net_net_candidates_local.csv yearly_high_low.csv CONTEXT.md index.html shortlist.html local.html'
 
       - name: ログファイルの保存 (Artifact)
         if: always()
@@ -203,6 +212,7 @@ jobs:
           path: |
             screener.log
             update_financials.log
+            yearly_high_low.log
             invalid_financials.csv
           if-no-files-found: ignore
 
