@@ -136,7 +136,7 @@ def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor
 
 
 def get_submitted_documents(date_str):
-    url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
+    url = f"https://api.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
 
     params = {
         "date": date_str,
@@ -399,7 +399,7 @@ def extract_shares_outstanding(soup, share_ctxs, sec_code):
 
 
 def fetch_xbrl_data(doc_id, sec_code):
-    url = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
+    url = f"https://api.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
 
     params = {
         "type": 1,
