@@ -136,7 +136,7 @@ def request_with_retry(url, params=None, headers=None, retries=3, backoff_factor
 
 
 def get_submitted_documents(date_str):
-    url = f"https://api.edinet-fsa.go.jp/api/v2/documents/{doc_id}"
+    url = "https://api.edinet-fsa.go.jp/api/v2/documents.json"
 
     params = {
         "date": date_str,
