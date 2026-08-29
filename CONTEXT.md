@@ -3,13 +3,13 @@
 このファイルは `make_context.py` が自動生成します。手で編集しないでください。
 相談時はこれ一枚を渡し、必要なスクリプト本体は指名して別途渡します。
 
-- 生成: 2026-08-29 09:19 JST
-- コミット: `92622e8` (main) / 2026-08-28 21:20
+- 生成: 2026-08-30 04:00 JST
+- コミット: `998a748` (main) / 2026-08-30 03:24
 
 ## いまの状態
 
 - 発行済株式数の充足: 3,828/3,830 (99.9%)
-- ネットネット候補（東証）: 136件
+- ネットネット候補（東証）: 135件
 - ネットネット候補（地方）: 4件
 - 名証: 掲載317件 / 期間内に約定78件 （相場日 2026-08-28 / 蓄積 7営業日）
 - 東証重複の判別: 未適用（is_local_only 列なし）
@@ -19,25 +19,25 @@
 
 | ファイル | 行数 | sha1 | 更新 | 概要 |
 | --- | ---: | --- | --- | --- |
-| update_financials.py | 853 | `86642015` | 2026-08-29 08:45 |  |
-| financials.py | 155 | `7d573865` | 2026-08-29 08:45 | financial_cache.csv の読み込み・正規化・妥当性チェック。 |
-| run_screener.py | 380 | `a218ab8d` | 2026-08-29 08:45 |  |
-| run_screener_local.py | 250 | `0b005c9c` | 2026-08-29 08:45 | 地方単独上場（現状は名証）のネットネット候補を抽出し、 |
-| price_metrics.py | 127 | `26228d2b` | 2026-08-29 08:45 | ネットネットスクリーナー用の価格指標を計算して列として追加するモジュール。 |
-| save_history.py | 159 | `7fd7268b` | 2026-08-29 08:45 |  |
-| jpx_alerts.py | 138 | `c1e4138c` | 2026-08-29 08:45 | JPX が公開している監理・整理銘柄一覧を取得し、DataFrame で返す。 |
-| fetch_jpx_listed.py | 232 | `646ee2d2` | 2026-08-29 08:45 | JPX が公開している「東証上場銘柄一覧」(data_j.xls) を取得し、 |
-| fetch_local_prices.py | 464 | `62247852` | 2026-08-29 08:45 | 名証（名古屋証券取引所）の株式相場表PDFから株価・売買高を抽出する。 |
-| generate_html.py | 133 | `4b7dee36` | 2026-08-29 08:45 | 社名を取り出す。 |
-| generate_local_html.py | 249 | `61df2e74` | 2026-08-29 08:45 | 地方市場（名証）版ネットネット候補ページの生成。 |
-| generate_shortlist.py | 522 | `585b5419` | 2026-08-29 08:45 | net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格指標付与済み） |
-| make_context.py | 286 | `2898f857` | 2026-08-29 08:45 | リポジトリの現状を CONTEXT.md 一枚にまとめる。 |
+| update_financials.py | 853 | `ea582cd1` | 2026-08-30 03:31 |  |
+| financials.py | 155 | `7d573865` | 2026-08-30 03:31 | financial_cache.csv の読み込み・正規化・妥当性チェック。 |
+| run_screener.py | 380 | `a218ab8d` | 2026-08-30 03:31 |  |
+| run_screener_local.py | 250 | `0b005c9c` | 2026-08-30 03:31 | 地方単独上場（現状は名証）のネットネット候補を抽出し、 |
+| price_metrics.py | 127 | `26228d2b` | 2026-08-30 03:31 | ネットネットスクリーナー用の価格指標を計算して列として追加するモジュール。 |
+| save_history.py | 159 | `7fd7268b` | 2026-08-30 03:31 |  |
+| jpx_alerts.py | 138 | `c1e4138c` | 2026-08-30 03:31 | JPX が公開している監理・整理銘柄一覧を取得し、DataFrame で返す。 |
+| fetch_jpx_listed.py | 232 | `646ee2d2` | 2026-08-30 03:31 | JPX が公開している「東証上場銘柄一覧」(data_j.xls) を取得し、 |
+| fetch_local_prices.py | 464 | `62247852` | 2026-08-30 03:31 | 名証（名古屋証券取引所）の株式相場表PDFから株価・売買高を抽出する。 |
+| generate_html.py | 133 | `4b7dee36` | 2026-08-30 03:31 | 社名を取り出す。 |
+| generate_local_html.py | 249 | `61df2e74` | 2026-08-30 03:31 | 地方市場（名証）版ネットネット候補ページの生成。 |
+| generate_shortlist.py | 522 | `585b5419` | 2026-08-30 03:31 | net_net_candidates.csv（run_screener.py が出力、price_metrics.py で価格指標付与済み） |
+| make_context.py | 286 | `2898f857` | 2026-08-30 03:31 | リポジトリの現状を CONTEXT.md 一枚にまとめる。 |
 
 ## データファイル
 
 ### financial_cache.csv
 
-- 行数: 3,830 / 列数: 29 / 更新: 2026-08-29 09:19
+- 行数: 3,830 / 列数: 29 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `filer_name`, `current_assets`, `total_liabilities`, `total_assets`, `equity_value`, `equity_type`, `equity_ratio`, `equity_basis`, `equity_total`, `equity_total_type`, `equity_ratio_total`, `equity_parent`, `equity_parent_type`, `equity_ratio_parent`, `cash_and_equivalents`, `cash_basis`, `cash_bs`, `cash_cf`, `shares_outstanding`, `shares_as_of`, `shares_source`, `doc_id`, `submit_date`, `doc_type`, `accounting_standard`, `consolidated`, `fiscal_period`, `bs_date`
 
 ```
@@ -48,29 +48,29 @@ sec_code      filer_name current_assets total_liabilities total_assets equity_va
 
 ### stock_cache.csv
 
-- 行数: 3,035 / 列数: 8 / 更新: 2026-08-29 09:19
+- 行数: 3,035 / 列数: 8 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `ticker`, `price`, `shares`, `market_cap`, `status`, `updated_at`, `shares_updated_at`
 
 ```
 sec_code ticker  price    shares    market_cap  status updated_at shares_updated_at
-    6546 6546.T 1154.0 5285649.0  6099638946.0 SUCCESS 2026-08-28        2026-08-11
-    7115 7115.T 1505.0 9818488.0 14776824440.0 SUCCESS 2026-08-28        2026-08-11
+    6546 6546.T 1156.0 5285649.0  6110210244.0 SUCCESS 2026-08-29        2026-08-11
+    7115 7115.T 1497.0 9818488.0 14698276536.0 SUCCESS 2026-08-29        2026-08-11
 ```
 
 ### net_net_candidates.csv
 
-- 行数: 136 / 列数: 29 / 更新: 2026-08-29 09:19
+- 行数: 135 / 列数: 29 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `company_name`, `ticker`, `price`, `market_cap`, `ncav`, `nc_ratio`, `equity_ratio`, `cash_and_equivalents`, `net_cash`, `net_cash_ratio`, `current_assets`, `total_liabilities`, `total_assets`, `accounting_standard`, `consolidated`, `fiscal_period`, `bs_date`, `submit_date`, `調整後終値`, `前日比%`, `5日騰落%`, `20日騰落%`, `60日安値乖離%`, `120日安値乖離%`, `52週安値乖離%`, `52週高値乖離%`, `停滞日数`, `20日平均売買代金(百万円)`
 
 ```
 sec_code    company_name ticker price   market_cap        ncav           nc_ratio equity_ratio cash_and_equivalents      net_cash      net_cash_ratio current_assets total_liabilities total_assets accounting_standard consolidated fiscal_period    bs_date submit_date 調整後終値 前日比% 5日騰落% 20日騰落% 60日安値乖離% 120日安値乖離% 52週安値乖離% 52週高値乖離% 停滞日数 20日平均売買代金(百万円)
     5103  昭和ホールディングス株式会社 5103.T   1.0   75847346.0   884713000 11.664389680820209        41.99         1764250000.0 -1292714000.0 -17.043628659070023     3941677000        3056964000   5270064000              J-GAAP           連結    2026-03-31 2026-03-31  2026-06-24   1.0  0.0 -75.0  -94.1      0.0       0.0      0.0    -98.4    2           18.7
-    7034 株式会社プロレド・パートナーズ 7034.T 362.0 3957237028.0 10348348000 2.6150437607802552        85.15         5667289000.0  3609190000.0  0.9120479704558148    12406447000        2058099000  13861295000              J-GAAP           個別    2026-10-31 2026-04-30  2026-06-15 362.0 -1.4  -5.5    0.6     10.4      10.4     10.4    -54.6    3           10.6
+    7034 株式会社プロレド・パートナーズ 7034.T 356.0 3891647464.0 10348348000 2.6591175320293607        85.15         5667289000.0  3609190000.0   0.927419565463497    12406447000        2058099000  13861295000              J-GAAP           個別    2026-10-31 2026-04-30  2026-06-15 356.0 -1.7  -3.0    2.0      8.5       8.5      8.5    -55.4    2           10.4
 ```
 
 ### net_net_candidates_local.csv
 
-- 行数: 4 / 列数: 38 / 更新: 2026-08-29 09:19
+- 行数: 4 / 列数: 38 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `company_name`, `local_name`, `market`, `sector`, `price`, `price_date`, `days_since_trade`, `traded_days_20`, `avg_turnover_20`, `avg_turnover_20_m`, `window_days`, `as_of`, `shares`, `shares_as_of`, `shares_age_days`, `shares_stale`, `shares_source`, `market_cap`, `ncav`, `nc_ratio`, `equity_ratio`, `cash_and_equivalents`, `net_cash`, `net_cash_ratio`, `current_assets`, `total_liabilities`, `total_assets`, `accounting_standard`, `consolidated`, `fiscal_period`, `bs_date`, `submit_date`, `alert_section`, `is_supervised`, `is_tse_listed`, `is_local_only`, `tse_list_as_of`
 - ⚠ 全行が空の列: `alert_section`
 
@@ -82,7 +82,7 @@ sec_code   company_name local_name market sector  price price_date days_since_tr
 
 ### screening_history.csv
 
-- 行数: 1,541 / 列数: 14 / 更新: 2026-08-29 09:19
+- 行数: 1,676 / 列数: 14 / 更新: 2026-08-30 04:00
 - 列: `date`, `sec_code`, `company_name`, `price`, `market_cap`, `ncav`, `ncav_ratio`, `cash_and_equivalents`, `net_cash`, `net_cash_ratio`, `operating_income`, `operating_cf`, `equity_ratio`, `rank`
 - ⚠ 全行が空の列: `operating_income`, `operating_cf`
 
@@ -94,7 +94,7 @@ sec_code   company_name local_name market sector  price price_date days_since_tr
 
 ### invalid_financials.csv
 
-- 行数: 1 / 列数: 12 / 更新: 2026-08-29 09:19
+- 行数: 1 / 列数: 12 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `filer_name`, `company_name`, `current_assets`, `total_liabilities`, `total_assets`, `equity_value`, `equity_ratio`, `doc_id`, `fiscal_period`, `bs_date`, `submit_date`
 
 ```
@@ -104,7 +104,7 @@ sec_code filer_name company_name current_assets total_liabilities total_assets e
 
 ### invalid_financials_local.csv
 
-- 行数: 1 / 列数: 12 / 更新: 2026-08-29 09:19
+- 行数: 1 / 列数: 12 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `filer_name`, `company_name`, `current_assets`, `total_liabilities`, `total_assets`, `equity_value`, `equity_ratio`, `doc_id`, `fiscal_period`, `bs_date`, `submit_date`
 
 ```
@@ -114,18 +114,18 @@ sec_code filer_name company_name current_assets total_liabilities total_assets e
 
 ### processed_docs.csv
 
-- 行数: 3,912 / 列数: 1 / 更新: 2026-08-29 09:19
+- 行数: 3,912 / 列数: 1 / 更新: 2026-08-30 04:00
 - 列: `doc_id`
 
 ```
   doc_id
-S100YF98
-S100YH23
+S100YCNV
+S100YCVX
 ```
 
 ### jpx_alerts_cache.csv
 
-- 行数: 118 / 列数: 4 / 更新: 2026-08-29 09:19
+- 行数: 118 / 列数: 4 / 更新: 2026-08-30 04:00
 - 列: `コード`, `銘柄名`, `指定年月日`, `区分`
 
 ```
@@ -136,7 +136,7 @@ S100YH23
 
 ### tse_listed.csv
 
-- 行数: 4,444 / 列数: 6 / 更新: 2026-08-29 08:45
+- 行数: 4,444 / 列数: 6 / 更新: 2026-08-30 03:31
 - 列: `sec_code`, `name`, `market_segment`, `sector33`, `is_domestic_stock`, `as_of`
 
 ```
@@ -147,7 +147,7 @@ sec_code                   name market_segment sector33 is_domestic_stock    as_
 
 ### local_price_history.csv
 
-- 行数: 2,219 / 列数: 12 / 更新: 2026-08-29 09:19
+- 行数: 2,219 / 列数: 12 / 更新: 2026-08-30 04:00
 - 列: `date`, `sec_code`, `name`, `market`, `sector`, `alert_section`, `is_supervised`, `close`, `last_quote`, `volume_k`, `traded`, `turnover`
 
 ```
@@ -158,7 +158,7 @@ sec_code                   name market_segment sector33 is_domestic_stock    as_
 
 ### local_prices.csv
 
-- 行数: 317 / 列数: 15 / 更新: 2026-08-29 09:19
+- 行数: 317 / 列数: 15 / 更新: 2026-08-30 04:00
 - 列: `sec_code`, `name`, `market`, `sector`, `alert_section`, `is_supervised`, `price`, `price_date`, `last_quote`, `traded_days_20`, `avg_turnover_20`, `avg_turnover_20_m`, `days_since_trade`, `window_days`, `as_of`
 
 ```
@@ -169,6 +169,6 @@ sec_code name market sector alert_section is_supervised  price price_date last_q
 
 ## 出力ページ
 
-- index.html: 55 KB / 更新 2026-08-29 09:19
-- shortlist.html: 101 KB / 更新 2026-08-29 09:19
-- local.html: 8 KB / 更新 2026-08-29 09:19
+- index.html: 55 KB / 更新 2026-08-30 04:00
+- shortlist.html: 102 KB / 更新 2026-08-30 04:00
+- local.html: 8 KB / 更新 2026-08-30 04:00
