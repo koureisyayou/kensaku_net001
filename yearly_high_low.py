@@ -95,7 +95,14 @@ def load_targets(source: str) -> pd.DataFrame:
 # ---------------------------------------------------------------- 取得
 
 def download(tickers: list[str], years: int) -> dict[str, pd.DataFrame]:
+    """銘柄ごとの日足を取得する。取れなかった銘柄は飛ばす。
+
+    1銘柄でも取得に失敗したら実行全体が止まる、という状態を避けることが
+    このループの前提。ここで例外が抜けると main() ごと落ち、後続の
+    「取得済み銘柄の当年更新」が一度も走らなくなる。
+    """
     frames: dict[str, pd.DataFrame] = {}
+    skipped: list[str] = []
 
     for i in range(0, len(tickers), CHUNK_SIZE):
         chunk = tickers[i:i + CHUNK_SIZE]
@@ -112,19 +119,51 @@ def download(tickers: list[str], years: int) -> dict[str, pd.DataFrame]:
             )
         except Exception as e:
             logger.warning(f"  一括取得に失敗しました: {e}")
+            skipped.extend(chunk)
             continue
 
         if raw is None or raw.empty:
+            logger.warning(f"  戻り値が空でした（{len(chunk)}銘柄をスキップ）。")
+            skipped.extend(chunk)
             continue
 
         for ticker in chunk:
+            # 銘柄ごとの取り出し。
+            # 依頼した銘柄数ではなく、実際に返ってきた列の形で判断する。
+            # yfinance は銘柄数によって単層列と MultiIndex を使い分けるため、
+            # len(chunk) で分岐すると戻り値の形と食い違うことがある。
             try:
-                df = raw[ticker] if len(chunk) > 1 else raw
+                if isinstance(raw.columns, pd.MultiIndex):
+                    df = raw[ticker]
+                else:
+                    df = raw
             except KeyError:
+                logger.warning(f"  {ticker}: 戻り値に含まれていません。")
+                skipped.append(ticker)
                 continue
+
+            # 取得できなかった銘柄は Close 列を持たないことがある。
+            # dropna(subset=["Close"]) は列が無いと KeyError を投げ、
+            # ここを抜けると download() から main() まで例外が伝播して
+            # 実行全体が停止する（後続の当年更新も行われない）。
+            if "Close" not in df.columns:
+                logger.warning(f"  {ticker}: Close 列がありません。")
+                skipped.append(ticker)
+                continue
+
             df = df.dropna(subset=["Close"])
-            if not df.empty:
-                frames[ticker] = df
+            if df.empty:
+                logger.warning(f"  {ticker}: 終値が全て欠損しています。")
+                skipped.append(ticker)
+                continue
+
+            frames[ticker] = df
+
+    if skipped:
+        logger.warning(
+            f"  取得できなかった銘柄 {len(skipped)} 件: {', '.join(skipped[:20])}"
+            + (" ..." if len(skipped) > 20 else "")
+        )
 
     return frames
 
