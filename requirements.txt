@@ -1,3 +1,25 @@
+# pandas は 2.x に固定している。3.x への移行は動作確認が済んでいない。
+#
+# 【3.x に上げるときに確認するもの】
+# update_financials.py   … read_csv の dtype 指定（"string" dtype を多用）、
+#                           df.loc[key] = {...} での行代入、
+#                           df_old.equals(df_new) による差分判定
+# fetch_local_prices.py  … pdfplumber の出力を DataFrame に組み立てる箇所
+# run_screener.py        … yfinance の戻り値の扱い、列の追加
+# price_metrics.py       … Series.iloc による位置指定、tail().min()/max()、
+#                           merge(how="left")
+# financials.py          … pd.to_numeric、複数条件の & 連結によるマスク、
+#                           clip(upper=)、df[~ok] での否定選択
+# generate_shortlist.py  … Int64 dtype、groupby、pd.to_datetime、
+#                           Series.map(dict) と .fillna(False)
+# save_history.py        … concat と drop_duplicates(subset=..., keep="last")
+# yearly_high_low.py     … astype("Int64")、groupby(df.index.year)
+# 上げた直後は index.html / shortlist.html の数値を目視で突き合わせる。
+#
+# 二次篩の net_my_filters は pandas を固定しておらず、3.x が入っている。
+# メジャーが違うが、やり取りは CSV 経由なので直接の影響は無い。
+# ただし CSV の書き出し表現が変わると読み取り側に伝わるため、
+# あちらで数値がおかしくなった場合はこちらのバージョンも確認する。
 pandas>=2.0,<3.0
 requests>=2.31.0
 yfinance==1.5.2
