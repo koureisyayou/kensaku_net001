@@ -27,6 +27,12 @@ from bs4 import BeautifulSoup
 JST = timezone(timedelta(hours=9))
 EDINET_API_KEY = os.environ.get("EDINET_API_KEY", "")
 
+# EDINET API のホスト。
+# disclosure.edinet-fsa.go.jp は画面用のホストで、API を叩いても
+# 「規定外操作が行われました」という HTML が返るだけになる。
+# API を使うときは必ずこちら。update_financials.py / enrich_pl.py も同じ。
+EDINET_API_BASE = "https://api.edinet-fsa.go.jp/api/v2"
+
 # update_financials.py と同じ定義（比較のため）
 TAGS_CURRENT_ASSETS = ["CurrentAssets", "CurrentAssetsIFRS", "AssetsCurrent"]
 TAGS_TOTAL_LIABILITIES = ["Liabilities", "LiabilitiesIFRS"]
@@ -75,7 +81,7 @@ def find_latest_doc(sec_code, days):
     print(f"[{sec_code}] 過去{days}日分の書類一覧を検索中...")
     for i in range(days):
         date_str = (today - timedelta(days=i)).strftime("%Y-%m-%d")
-        res = get("https://disclosure.edinet-fsa.go.jp/api/v2/documents.json",
+        res = get(f"{EDINET_API_BASE}/documents.json",
                   params={"date": date_str, "type": 2,
                           "Subscription-Key": EDINET_API_KEY})
         if not res:
@@ -111,7 +117,7 @@ def find_latest_doc(sec_code, days):
 
 
 def fetch_soup(doc_id):
-    res = get(f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}",
+    res = get(f"{EDINET_API_BASE}/documents/{doc_id}",
               params={"type": 1, "Subscription-Key": EDINET_API_KEY})
     if not res:
         return None
