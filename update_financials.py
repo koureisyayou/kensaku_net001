@@ -26,6 +26,8 @@ AMENDMENT_TYPES = {"130", "150", "170"}
 # 永久に埋まらない。その穴を埋め直すための仕組み。
 # ※ shares_outstanding は元々取得できない書類が一定数あるので、
 #   一度埋め直したらこのリストから外す方が無駄な再取得を防げる。
+# ※ 値が入っているが内容が誤っている列は、ここに足しても再取得されない
+#   （判定条件が isna() のため）。そういう列の直し方は別途検討する。
 REPAIR_COLS = ["bs_date"]
 
 # ログ設定
@@ -288,6 +290,10 @@ def build_context_ranks(soup):
 
     あわせて、各コンテキストの instant 日付も返す。これが貸借対照表の基準日で、
     EDINET の periodEnd（会計年度末）とは異なる。半期報告書では両者がずれる。
+
+    has_nonconsolidated は「書類のどこかに NonConsolidatedMember が
+    出てくるか」。連結・個別の判定そのものには使わないが、
+    出てこない書類を記録に残すための材料として返す（後述）。
     """
     ranks = {}
     instants = {}
@@ -298,7 +304,7 @@ def build_context_ranks(soup):
         if not ctx_id:
             continue
 
-        # 連結を出している会社かどうかの判定材料（Prior も含めて走査する）
+        # NonConsolidatedMember の有無（Prior も含めて走査する）
         if "NonConsolidated" in ctx_id:
             has_nonconsolidated = True
 
@@ -493,13 +499,33 @@ def fetch_xbrl_data(doc_id, sec_code):
                 used_ns = [n for n in (ca_ns, tl_ns, ta_ns, eq_ns) if n]
                 accounting_std = "IFRS" if any("jpigp" in n for n in used_ns) else "J-GAAP"
 
+                # ------------------------------------------------------
                 # 連結・個別の判定。
-                # 推測ではなく、実際に値を採用したコンテキストで判定する。
-                # NonConsolidatedMember 付きなら個別、無ければ連結。
-                # 個別しか出していない会社は NonConsolidatedMember 自体が付かないので、
-                # 連結を出しているか（has_nonconsolidated）と併せて見る。
+                #
+                # 実際に値を採用したコンテキストだけで決める。
+                # NonConsolidatedMember が付いていれば個別、無ければ連結。
+                #
+                # 以前は「書類のどこかに NonConsolidatedMember があるか」
+                # (has_nonconsolidated) を条件に加えていたが、これは誤りだった。
+                # EDINET のタクソノミでは、連結財務諸表を作っていない会社の
+                # 個別財務諸表にこそ NonConsolidatedMember が付く。逆に、
+                # 連結を作っている会社が半期報告書で中間個別を省略すると、
+                # 書類に NonConsolidatedMember が一つも現れない。
+                # その場合に has_nonconsolidated が False になり、連結の
+                # 貸借対照表を採用しているのに「個別」と記録していた。
+                # ------------------------------------------------------
                 ctx_is_nonconsolidated = "NonConsolidated" in (ca_ctx or "")
-                consolidated = bool(has_nonconsolidated) and not ctx_is_nonconsolidated
+                consolidated = not ctx_is_nonconsolidated
+
+                # NonConsolidatedMember が書類に一度も出てこない場合、
+                # 上の判定は「メンバーが無い＝連結」に依拠している。
+                # 実データ（候補145銘柄）ではこれで正しかったが、全上場企業で
+                # 検証したわけではないので、該当する書類はログに残しておく。
+                if consolidated and not has_nonconsolidated:
+                    logger.info(
+                        f"[{sec_code}] NonConsolidatedMember が書類に無いため連結と判定 "
+                        f"(ctx={ca_ctx})"
+                    )
 
                 soup.decompose()
 
@@ -830,6 +856,16 @@ def main():
         if col in df_new.columns:
             filled = int(df_new[col].notna().sum())
             logger.info(f"[充足状況/実行後] {col}: {filled} / {len(df_new)}")
+
+    # 連結・個別の内訳。判定の妥当性を継続的に見張るために出す。
+    # 半期報告書だけ「個別」に極端に偏っていたら、判定が壊れている疑いがある。
+    if "consolidated" in df_new.columns and "doc_type" in df_new.columns:
+        interim = df_new["doc_type"].isin(["160", "170"])
+        for label, subset in (("有報", df_new[~interim]), ("半期", df_new[interim])):
+            if len(subset):
+                counts = subset["consolidated"].astype(str).value_counts()
+                inner = ", ".join(f"{k}={v}" for k, v in counts.items())
+                logger.info(f"[区分/{label}] {inner} (計 {len(subset)}件)")
 
     # 中身が同じでも、列構成が変わっていれば書き出す。
     # 新設列（bs_date など）を追加した直後に新規取得が0件だと、
