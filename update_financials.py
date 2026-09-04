@@ -802,6 +802,22 @@ def main():
                     no_shares_count += 1
                     logger.info(f"[{sec_code}] 発行済株式数を取得できませんでした (doc_id={doc_id})")
 
+                # ------------------------------------------------------
+                # ここで pandas 2.x が FutureWarning を出す。
+                #   "The behavior of DataFrame concatenation with empty or
+                #    all-NA entries is deprecated."
+                #
+                # 空（または全列NA）の DataFrame に .loc で行を追加すると、
+                # pandas は内部で concat を使い、その dtype 決定の挙動が
+                # 将来変わる。--rebuild の1件目でだけ出る。
+                #
+                # 現状は動作に影響しない。直すなら 1行ずつの .loc 代入を
+                # やめ、辞書に溜めて最後にまとめて結合する形にする。
+                # ただし financial_cache.csv の書き出し経路を変えるため、
+                # 列順・dtype・既存行の上書き挙動が同じかの確認が要る。
+                # pandas 3.x へ上げるときに、requirements.txt のコメントに
+                # 挙げた他の箇所とまとめて対応するのが安全。
+                # ------------------------------------------------------
                 df_new.loc[sec_code] = {
                     "filer_name": doc["filer_name"],
                     "current_assets": fin["current_assets"],
