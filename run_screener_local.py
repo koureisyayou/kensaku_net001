@@ -52,6 +52,9 @@ MIN_TURNOVER_MYEN = 0.0
 # 株数の鮮度。除外はせず列とフラグに留める。
 SHARES_STALE_DAYS = 180
 
+# 結合で落ちた銘柄をログに列挙するときの上限。
+DIAG_LIST_LIMIT = 30
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -89,6 +92,45 @@ def annotate_tse(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
         return df, False
 
     return annotate(df), True
+
+
+def log_merge_diagnosis(local: pd.DataFrame, fin: pd.DataFrame, stage1: pd.DataFrame) -> None:
+    """結合で落ちた銘柄の内訳を出す。
+
+    「財務と相場の両方が揃った銘柄: N件」だけでは、残りが
+      ・財務データそのものが無い
+      ・財務はあるが第1段階（NCAV>0 かつ 自己資本比率30%以上）で落ちた
+    のどちらなのか分からない。前者はデータの取りこぼしで調べる価値があるが、
+    後者は篩が正しく働いているだけで、対処するものではない。
+    毎回この区別を手で調べ直さずに済むよう、内訳をログに残す。
+    """
+    local_codes = set(local["sec_code"])
+    fin_codes = set(fin["sec_code"])
+    stage1_codes = set(stage1["sec_code"])
+
+    no_fin = sorted(local_codes - fin_codes)
+    dropped = sorted((local_codes & fin_codes) - stage1_codes)
+
+    def _fmt(codes):
+        head = ", ".join(codes[:DIAG_LIST_LIMIT])
+        return head + (" ..." if len(codes) > DIAG_LIST_LIMIT else "")
+
+    if no_fin:
+        logger.info(
+            f"  ├ 財務データ無し: {len(no_fin)}件 ({_fmt(no_fin)})"
+        )
+        logger.info(
+            "  │   EDINETに書類が無いか、証券コードが突合できていない可能性がある。"
+        )
+    if dropped:
+        logger.info(
+            f"  ├ 第1段階で除外: {len(dropped)}件 ({_fmt(dropped)})"
+        )
+        logger.info(
+            f"  │   NCAV<=0 または 自己資本比率<{MIN_EQUITY_RATIO:.0f}%。篩が働いた結果であり異常ではない。"
+        )
+    if not no_fin and not dropped:
+        logger.info("  └ 相場データのある銘柄はすべて第1段階を通過している。")
 
 
 def main():
@@ -150,9 +192,17 @@ def main():
 
     # ---------------------------------------------------------- 結合
     # 銘柄名は財務側（EDINETの提出者名）を正とし、名証側の略称は別列に残す。
+    #
+    # 結合相手は fin（財務データ全体）ではなく stage1（第1段階通過分）。
+    # したがって「揃わなかった」銘柄には、財務データが無いものと、
+    # 財務はあるが NCAV・自己資本比率の条件で落ちたものの両方が含まれる。
     local = local.rename(columns={"name": "local_name"})
     merged = stage1.merge(local, on="sec_code", how="inner", suffixes=("", "_local"))
-    logger.info(f"【結合】財務と相場の両方が揃った銘柄: {len(merged)}件")
+    logger.info(
+        f"【結合】第1段階を通過し、かつ相場データがある銘柄: "
+        f"{len(merged)}件 / 相場データ {len(local)}件"
+    )
+    log_merge_diagnosis(local, fin, stage1)
 
     if merged.empty:
         logger.warning("結合結果が0件です。空のCSVを出力して終了します。")
