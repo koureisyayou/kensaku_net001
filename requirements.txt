@@ -2,7 +2,7 @@
 #
 # 【3.x に上げるときに確認するもの】
 # update_financials.py   … read_csv の dtype 指定（"string" dtype を多用）、
-#                           df.loc[key] = {...} での行代入、
+#                           df.loc[key] = {...} での行代入（2.x でも FutureWarning が出る）、
 #                           df_old.equals(df_new) による差分判定
 # fetch_local_prices.py  … pdfplumber の出力を DataFrame に組み立てる箇所
 # run_screener.py        … yfinance の戻り値の扱い、列の追加
@@ -26,4 +26,10 @@ yfinance==1.5.2
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 pdfplumber>=0.11,<0.12
+# .xls 用。JPXの銘柄一覧が .xlsx に変わったため現在は使っていないが、
+# 他のExcelを読む可能性を残して外していない。
 xlrd>=2.0,<3.0
+# .xlsx 用。fetch_jpx_listed.py が JPX の data_j.xlsx を読むのに必要。
+# 他パッケージの依存としても入るが、それに頼ると上流の変更で消えるため
+# 直接の依存として明示する。
+openpyxl>=3.1
