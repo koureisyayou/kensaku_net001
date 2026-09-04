@@ -1,232 +1,244 @@
 """fetch_jpx_listed.py
 
-JPX が公開している「東証上場銘柄一覧」(data_j.xls) を取得し、
-東証に上場しているコードの集合を tse_listed.csv として保存する。
+JPXが公開している「東証上場銘柄一覧」を取得し、証券コードの一覧を作る。
+地方単独上場（東証に重複上場していない銘柄）を判別するために使う。
 
-用途:
-    名証（および他の地方取引所）の相場表には東証との重複上場銘柄が大量に
-    含まれる。地方単独上場だけを抽出するには「東証に載っていないこと」を
-    確認する必要があり、その突合表がこのファイル。
+    https://www.jpx.co.jp/markets/statistics-equities/misc/01.html
+    → data_j.xlsx （毎月末の状態。翌月の第2営業日ごろ更新）
 
-参照ページ:
-    東証上場銘柄一覧 https://www.jpx.co.jp/markets/statistics-equities/misc/01.html
+出力:
+    tse_listed.csv   sec_code, company_name, market, as_of
 
-重要な制約:
-    このファイルは【月次】更新（毎月第3営業日の午前9時以降に前月末データへ差替）。
-    新規上場・上場廃止の反映は最大5週間遅れる。したがって
-      - 直近に東証へ上場した銘柄は一時的に「名証単独」と誤判定される
-      - 直近に東証を上場廃止した銘柄は一時的に「重複上場」と誤判定される
-    除外ではなくフラグとして扱い、必ず as_of（一覧の基準月末）を併記すること。
+使い方:
+    python fetch_jpx_listed.py
+    python fetch_jpx_listed.py --file data_j.xlsx   # ローカルのファイルから
 
-    取得に失敗した場合は前回のキャッシュを使う（JPX 側の障害でスクリーニング
-    全体が止まらないようにするため）。月次更新なので、多少古くても実害は小さい。
+他のスクリプトからは annotate() を呼ぶ:
+    from fetch_jpx_listed import annotate
+    df = annotate(df)   # is_tse_listed / is_local_only / tse_list_as_of を付与
 """
 
 from __future__ import annotations
 
+import argparse
 import io
-import re
+import logging
+import os
 import sys
-from pathlib import Path
+from datetime import datetime
 
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 
-JPX_LIST_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
-JPX_XLS_FALLBACK = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/"
-    "tvdivq0000001vg2-att/data_j.xls"
+LIST_PAGE = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
+
+# ページ内のリンクを探して見つからなかったときに使う既定のURL。
+#
+# JPXがファイルを差し替えるとこのURLは変わる。実際、2026年9月に
+# 拡張子が .xls から .xlsx へ変わり、旧URLが404になった。
+# だから毎回まずページ内のリンクを探し、これは保険として使う。
+# 404が続くようなら、ページを開いて実際のリンクを確認して差し替えること。
+FALLBACK_XLS = ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+                "tvdivq0000001vg2-att/data_j.xlsx")
+
+OUTPUT_FILE = "tse_listed.csv"
+
+# ファイル名の判定に使う語。拡張子は含めない。
+# .xls と .xlsx のどちらでも拾えるようにするため。
+XLS_NAME_HINT = "data_j"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-
-OUTPUT_CSV = Path("tse_listed.csv")
-TIMEOUT = 30
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; net-net-screener/1.0)"}
-
-# 「市場・商品区分」のうち内国普通株式にあたるもの。
-# ETF・REIT・出資証券・外国株式・PRO Market はネットネットの対象外。
-DOMESTIC_STOCK_RE = re.compile(r"内国株式")
-
-# 列名ゆれの吸収（jpx_alerts.py と同じ方針）
-CODE_COLS = ["コード", "銘柄コード", "code"]
-NAME_COLS = ["銘柄名", "会社名", "name"]
-SEGMENT_COLS = ["市場・商品区分", "市場区分"]
-SECTOR33_COLS = ["33業種区分"]
-DATE_COLS = ["日付"]
+logger = logging.getLogger("JPXListed")
 
 
-def _pick(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
-
-
-def _resolve_xls_url() -> str:
-    """掲載ページから data_j.xls の実URLを拾う。失敗したら既知のURLを使う。
-
-    JPX は差替時にパスの英数字部分を変えることがあるため、ページ側の
-    リンクを正としてハードコードを保険にする。
-    """
-    try:
-        res = requests.get(JPX_LIST_PAGE, headers=HEADERS, timeout=TIMEOUT)
-        res.raise_for_status()
-        res.encoding = res.apparent_encoding
-        m = re.search(r'href="([^"]*data_j\.xls)"', res.text)
-        if m:
-            href = m.group(1)
-            url = href if href.startswith("http") else "https://www.jpx.co.jp" + href
-            if url != JPX_XLS_FALLBACK:
-                print(f"[jpx_listed] リンクが既知のURLと異なります: {url}")
-            return url
-        print("[jpx_listed] ページ内に data_j.xls のリンクが見つかりません。既知のURLを使います。")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[jpx_listed] 掲載ページの取得に失敗: {exc}。既知のURLを使います。")
-    return JPX_XLS_FALLBACK
-
-
-def _normalize_code(series: pd.Series) -> pd.Series:
-    """コードを4文字の文字列に揃える（130A のような英数字コードに対応）。"""
+def normalize_code(series: pd.Series) -> pd.Series:
     return (
         series.astype(str)
         .str.strip()
-        .str.replace(r"\.0$", "", regex=True)   # Excel 由来の 1766.0 対策
+        .str.replace(r"\.0$", "", regex=True)
         .str.upper()
         .str.zfill(4)
     )
 
 
-def fetch_tse_listed(use_cache_on_error: bool = True) -> pd.DataFrame:
-    """東証上場銘柄一覧を返す。
+def find_xls_url() -> str | None:
+    """一覧ページから data_j のリンクを探す。
 
-    列: sec_code / name / market_segment / sector33 / is_domestic_stock / as_of
+    拡張子は判定に使わない。JPXは .xls から .xlsx へ変えた実績があり、
+    次に何へ変わるか分からないため、ファイル名の主要部だけで照合する。
     """
     try:
-        url = _resolve_xls_url()
-        res = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        res = requests.get(
+            LIST_PAGE, timeout=30,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
         res.raise_for_status()
-        # .xls（BIFF形式）なので xlrd が必要。requirements.txt に xlrd を入れること。
-        raw = pd.read_excel(io.BytesIO(res.content), dtype=str)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[jpx_listed] 取得に失敗しました: {exc}")
-        if use_cache_on_error and OUTPUT_CSV.exists():
-            print(f"[jpx_listed] キャッシュを使用: {OUTPUT_CSV}")
-            return pd.read_csv(OUTPUT_CSV, dtype=str)
-        return pd.DataFrame(
-            columns=["sec_code", "name", "market_segment", "sector33",
-                     "is_domestic_stock", "as_of"]
+    except Exception as e:
+        logger.warning(f"[jpx_listed] 一覧ページを取得できませんでした: {e}")
+        return None
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    hits = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if XLS_NAME_HINT in href.lower():
+            hits.append(href if href.startswith("http")
+                        else "https://www.jpx.co.jp" + href)
+
+    if not hits:
+        logger.warning(
+            f"[jpx_listed] ページ内に {XLS_NAME_HINT} を含むリンクが見つかりません。"
+            "既知のURLを使います。ページの構造が変わった可能性があるので、"
+            f"{LIST_PAGE} を開いて実際のリンクを確認してください。"
         )
+        return None
 
-    raw.columns = [str(c).strip() for c in raw.columns]
-    code_col = _pick(raw, CODE_COLS)
-    segment_col = _pick(raw, SEGMENT_COLS)
+    if len(hits) > 1:
+        logger.info(f"[jpx_listed] 候補が {len(hits)} 件見つかりました。先頭を使います。")
+    logger.info(f"[jpx_listed] リンクを検出: {hits[0]}")
+    return hits[0]
 
-    if code_col is None or segment_col is None:
-        print(f"[jpx_listed] 想定した列がありません: {list(raw.columns)}")
-        if use_cache_on_error and OUTPUT_CSV.exists():
-            return pd.read_csv(OUTPUT_CSV, dtype=str)
-        return pd.DataFrame(
-            columns=["sec_code", "name", "market_segment", "sector33",
-                     "is_domestic_stock", "as_of"]
+
+def download(url: str) -> bytes | None:
+    try:
+        res = requests.get(
+            url, timeout=60,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
         )
+        res.raise_for_status()
+        return res.content
+    except Exception as e:
+        logger.error(f"[jpx_listed] 取得に失敗しました: {e}")
+        return None
 
-    out = pd.DataFrame()
-    out["sec_code"] = _normalize_code(raw[code_col])
 
-    name_col = _pick(raw, NAME_COLS)
-    out["name"] = raw[name_col].astype(str).str.strip() if name_col else ""
+def parse(content: bytes | str) -> pd.DataFrame:
+    """銘柄一覧のExcelを読み、必要な列だけ取り出す。
 
-    out["market_segment"] = raw[segment_col].astype(str).str.strip()
+    .xls は xlrd、.xlsx は openpyxl が必要。エンジンは指定せず pandas に
+    判別させるが、openpyxl が入っていないと .xlsx で失敗するため、
+    requirements.txt には openpyxl を明示している。
+    """
+    source = content if isinstance(content, str) else io.BytesIO(content)
+    df = pd.read_excel(source, dtype=str)
 
-    sector_col = _pick(raw, SECTOR33_COLS)
-    out["sector33"] = raw[sector_col].astype(str).str.strip() if sector_col else ""
+    # 列名はJPX側の表記に合わせる。年によって表記ゆれがあるため候補で探す。
+    col_map = {}
+    for key, candidates in (
+        ("sec_code", ["コード", "銘柄コード"]),
+        ("company_name", ["銘柄名"]),
+        ("market", ["市場・商品区分", "市場区分"]),
+    ):
+        for cand in candidates:
+            if cand in df.columns:
+                col_map[key] = cand
+                break
 
-    out["is_domestic_stock"] = out["market_segment"].str.contains(
-        DOMESTIC_STOCK_RE, na=False
-    )
+    missing = [k for k in ("sec_code", "company_name") if k not in col_map]
+    if missing:
+        logger.error(
+            f"[jpx_listed] 必要な列が見つかりません: {missing} / "
+            f"実際の列: {list(df.columns)}"
+        )
+        return pd.DataFrame()
 
-    # 一覧の基準日（列にあれば採用。無ければ空欄）
-    date_col = _pick(raw, DATE_COLS)
-    as_of = ""
-    if date_col is not None:
-        values = raw[date_col].dropna().astype(str).str.strip()
-        if not values.empty:
-            as_of = values.iloc[0]
-    out["as_of"] = as_of
+    out = pd.DataFrame({
+        "sec_code": normalize_code(df[col_map["sec_code"]]),
+        "company_name": df[col_map["company_name"]].astype(str).str.strip(),
+    })
+    if "market" in col_map:
+        out["market"] = df[col_map["market"]].astype(str).str.strip()
+    else:
+        out["market"] = ""
 
-    out = out.drop_duplicates(subset=["sec_code"], keep="first").reset_index(drop=True)
-
-    domestic = int(out["is_domestic_stock"].sum())
-    print(f"[jpx_listed] 全{len(out)}件（内国株式 {domestic}件） 基準: {as_of or '不明'}")
-
-    out.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    out = out[out["sec_code"].str.match(r"^[0-9][0-9A-Z]{3}$")]
+    out = out.drop_duplicates(subset=["sec_code"]).reset_index(drop=True)
+    out["as_of"] = datetime.now().strftime("%Y%m%d")
     return out
 
 
-def load_tse_codes(domestic_only: bool = True, refresh: bool = False) -> set[str]:
-    """東証上場コードの集合を返す。
+def load_cached() -> pd.DataFrame:
+    if not os.path.exists(OUTPUT_FILE):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(OUTPUT_FILE, dtype={"sec_code": str, "as_of": str})
+        logger.info(f"[jpx_listed] キャッシュを使用: {OUTPUT_FILE} ({len(df)}件)")
+        return df
+    except Exception as e:
+        logger.warning(f"[jpx_listed] キャッシュを読めませんでした: {e}")
+        return pd.DataFrame()
 
-    refresh=False かつ tse_listed.csv があればそれを読む（月次更新なので
-    毎回取りに行く必要はない）。地方版の集計から呼ぶ側はこちらを使う。
+
+def annotate(df: pd.DataFrame) -> pd.DataFrame:
+    """東証上場かどうかのフラグを付ける。
+
+    tse_listed.csv が無い、または読めない場合は
+    is_tse_listed / is_local_only を付けずにそのまま返す。
+    呼び出し側は列の有無で判別すること。
     """
-    if refresh or not OUTPUT_CSV.exists():
-        df = fetch_tse_listed()
-    else:
-        df = pd.read_csv(OUTPUT_CSV, dtype=str)
-        df["is_domestic_stock"] = (
-            df["is_domestic_stock"].astype(str).str.strip().str.lower().isin(("true", "1"))
-        )
+    tse = load_cached()
+    if tse.empty or "sec_code" not in tse.columns:
+        return df
 
-    if df.empty:
-        return set()
-    if domestic_only:
-        df = df[df["is_domestic_stock"]]
-    return set(df["sec_code"].astype(str))
+    listed = set(tse["sec_code"].astype(str))
+    as_of = tse["as_of"].iloc[0] if "as_of" in tse.columns and len(tse) else ""
 
-
-def annotate(local_df: pd.DataFrame, code_col: str = "sec_code") -> pd.DataFrame:
-    """地方相場のDataFrameに東証重複上場のフラグを付けて返す。
-
-    追加列:
-        is_tse_listed  東証上場銘柄一覧に載っているか
-        is_local_only  載っていない = 地方単独上場の候補
-        tse_list_as_of 突合に使った一覧の基準（月次更新のため遅延がある）
-    """
-    codes = load_tse_codes()
-
-    as_of = ""
-    if OUTPUT_CSV.exists():
-        cached = pd.read_csv(OUTPUT_CSV, dtype=str)
-        if not cached.empty and "as_of" in cached.columns:
-            as_of = str(cached["as_of"].iloc[0])
-
-    out = local_df.copy()
-    normalized = _normalize_code(out[code_col])
-    out["is_tse_listed"] = normalized.isin(codes)
+    out = df.copy()
+    out["is_tse_listed"] = out["sec_code"].astype(str).isin(listed)
     out["is_local_only"] = ~out["is_tse_listed"]
     out["tse_list_as_of"] = as_of
     return out
 
 
-if __name__ == "__main__":
-    listed = fetch_tse_listed()
-    if listed.empty:
-        print("[jpx_listed] 取得できませんでした。")
+def main():
+    ap = argparse.ArgumentParser(description="東証上場銘柄一覧の取得")
+    ap.add_argument("--file", help="ローカルの data_j.xlsx を読む")
+    args = ap.parse_args()
+
+    if args.file:
+        result = parse(args.file)
+    else:
+        url = find_xls_url() or FALLBACK_XLS
+        content = download(url)
+
+        # ページ内のリンクで失敗したら、既定のURLでもう一度試す。
+        # 逆にページのリンクが新しくなっている場合もあるため、両方試す。
+        if content is None and url != FALLBACK_XLS:
+            logger.info(f"[jpx_listed] 既定のURLで再試行します: {FALLBACK_XLS}")
+            content = download(FALLBACK_XLS)
+
+        if content is None:
+            logger.warning(
+                "[jpx_listed] 取得できませんでした。既存の tse_listed.csv をそのまま使います。"
+            )
+            cached = load_cached()
+            if cached.empty:
+                logger.error(
+                    "[jpx_listed] キャッシュもありません。"
+                    "東証重複の判別ができない状態です。"
+                )
+                sys.exit(1)
+            return
+
+        result = parse(content)
+
+    if result.empty:
+        logger.error("[jpx_listed] 銘柄を1件も取得できませんでした。既存のファイルは残します。")
         sys.exit(1)
 
-    print(listed.head(10).to_string(index=False))
+    result.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
+    logger.info(f"[jpx_listed] 東証上場銘柄一覧を取得しました: {len(result)}件 -> {OUTPUT_FILE}")
 
-    # local_prices.csv があれば、その場で地方単独の件数を出しておく。
-    local_path = Path("local_prices.csv")
-    if local_path.exists():
-        local = pd.read_csv(local_path, dtype={"sec_code": str})
-        annotated = annotate(local)
-        local_only = annotated[annotated["is_local_only"]]
-        traded = local_only[local_only["price"].notnull()]
-        print()
-        print(f"名証掲載 {len(annotated)}件 / 東証重複 {int(annotated['is_tse_listed'].sum())}件")
-        print(f"地方単独の候補 {len(local_only)}件（うち期間内に約定あり {len(traded)}件）")
-        if not traded.empty:
-            cols = [c for c in ("sec_code", "name", "market", "price",
-                                "traded_days_20", "avg_turnover_20_m")
-                    if c in traded.columns]
-            print(traded[cols].head(30).to_string(index=False))
+    if "market" in result.columns:
+        counts = result["market"].value_counts()
+        for market, n in counts.head(8).items():
+            logger.info(f"  {market}: {n}件")
+
+
+if __name__ == "__main__":
+    main()
