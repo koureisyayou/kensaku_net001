@@ -38,6 +38,10 @@ MIN_NC_RATIO = 1.0        # NCAV / 時価総額
 REQUEST_INTERVAL = 0.4
 RETRY_INTERVAL = 1.5
 
+# 取得失敗を表すステータス。再試行の対象であり、回復したときは
+# ここから1件減らす（どれを減らすかは元のステータスで決める）。
+FAILED_STATUSES = ("NO_PRICE", "YF_ERROR", "NOT_FOUND")
+
 
 def load_stock_cache():
     """株価・株式数・ステータスキャッシュの読み込み"""
@@ -292,21 +296,26 @@ def run_pipeline(financial_df):
     # Yahoo側のレート制限にかかると失敗が連続して発生し、上場している銘柄まで
     # NO_PRICE として落ちてしまうため、間隔を空けて一度だけやり直す。
     retry_codes = [c for c in rows_by_code
-                   if stock_cache.get(c, {}).get("status") in ("NO_PRICE", "YF_ERROR", "NOT_FOUND")]
+                   if stock_cache.get(c, {}).get("status") in FAILED_STATUSES]
 
     if retry_codes:
         logger.info(f"↻ 取得失敗 {len(retry_codes)}銘柄を再試行します（間隔 {RETRY_INTERVAL}秒）")
         time.sleep(5)
         recovered = 0
         for sec_code in retry_codes:
+            # 回復したときにどのステータスから1件減らすかを決めるため、
+            # process() がキャッシュを上書きする前に元のステータスを控える。
+            # 固定の順番（NO_PRICE→YF_ERROR→NOT_FOUND）で減らすと、
+            # YF_ERROR だった銘柄が回復しても NO_PRICE の件数が減ってしまい、
+            # 診断結果の内訳が実態とずれる。
+            prev_status = stock_cache.get(sec_code, {}).get("status")
+
             status = process(sec_code, rows_by_code[sec_code])
             if status == "SUCCESS":
                 recovered += 1
                 status_counts["SUCCESS"] += 1
-                for key in ("NO_PRICE", "YF_ERROR", "NOT_FOUND"):
-                    if status_counts.get(key, 0) > 0:
-                        status_counts[key] -= 1
-                        break
+                if prev_status and status_counts.get(prev_status, 0) > 0:
+                    status_counts[prev_status] -= 1
             time.sleep(RETRY_INTERVAL)
         logger.info(f"↻ 再試行で {recovered}/{len(retry_codes)} 銘柄が回復しました")
 
