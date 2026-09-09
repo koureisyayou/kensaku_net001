@@ -94,6 +94,73 @@ def save_stock_cache(cache):
     logger.info(f"株価・株式数キャッシュ保存完了: {len(df)}件")
 
 
+def drop_delisted(df):
+    """東証上場銘柄一覧に無い銘柄を落とす。
+
+    EDINET には上場廃止後も過去1年分の書類が残るため、
+    financial_cache.csv には廃止済みの銘柄が積み上がっていく。
+    2026-09 時点で166件あり、そのすべてが yfinance でも
+    価格を取得できず NO_PRICE になっていた。第2段階で
+    1件ずつリクエストを投げて失敗し、再試行までしているので、
+    実行時間の数分をここに費やしていた。
+
+    tse_listed.csv は月次更新（fetch_jpx_listed.py が月初に取得）なので、
+    直近に上場した銘柄は最大1か月ほど一覧に入らず、ここで落ちる。
+    この篩は「新規上場をいち早く拾う」ためのものではないので、
+    その遅れは許容する。
+
+    tse_listed.csv が無い・読めない場合は何もしない。
+    ファイルが1つ欠けただけで候補が0件になる方が危険なため。
+    戻り値は (残った df, 除外を行ったか)。
+    """
+    try:
+        from fetch_jpx_listed import annotate
+    except ImportError:
+        logger.warning("fetch_jpx_listed.py が見つかりません。上場廃止の除外を行いません。")
+        return df, False
+
+    if not os.path.exists("tse_listed.csv"):
+        logger.warning(
+            "tse_listed.csv がありません。上場廃止の除外を行わずに続行します。"
+            "（python fetch_jpx_listed.py で取得できます）"
+        )
+        return df, False
+
+    annotated = annotate(df)
+    if "is_tse_listed" not in annotated.columns:
+        logger.warning("tse_listed.csv を読めませんでした。上場廃止の除外を行いません。")
+        return df, False
+
+    before = len(annotated)
+    kept = annotated[annotated["is_tse_listed"]].copy()
+    dropped = before - len(kept)
+
+    as_of = ""
+    if "tse_list_as_of" in annotated.columns and not annotated.empty:
+        as_of = str(annotated["tse_list_as_of"].iloc[0])
+
+    logger.info(
+        f"【上場チェック】東証一覧({as_of})に無い {dropped}件を除外: "
+        f"{before}件 -> {len(kept)}件"
+    )
+
+    if dropped:
+        codes = sorted(annotated.loc[~annotated["is_tse_listed"], "sec_code"].astype(str))
+        head = ", ".join(codes[:30])
+        logger.info(
+            f"  除外した銘柄: {head}{' ...' if len(codes) > 30 else ''}"
+        )
+        logger.info(
+            "  EDINETに書類が残っている上場廃止銘柄です。"
+            "直近に上場した銘柄は一覧の更新（月初）まで含まれません。"
+        )
+
+    # 判定用に付いた列は下流に渡さない
+    kept = kept.drop(columns=[c for c in ("is_tse_listed", "is_local_only", "tse_list_as_of")
+                              if c in kept.columns])
+    return kept, True
+
+
 def fetch_shares_count(ticker):
     """【重い処理】発行済株式数のみを取得（30日毎にのみ実行）"""
     shares = None
@@ -232,6 +299,15 @@ def run_pipeline(financial_df):
     ].copy()
 
     logger.info(f"【第1段階】総銘柄数: {len(financial_df)} -> 財務スクリーニング通過: {len(stage1_df)}銘柄")
+
+    # 上場廃止銘柄の除外。
+    # 財務の篩を通した後に行う。順番を逆にすると、上場している銘柄まで
+    # 一覧の欠落で落ちたときに第1段階の件数が変わり、原因の切り分けが難しくなる。
+    stage1_df, _ = drop_delisted(stage1_df)
+
+    if stage1_df.empty:
+        logger.error("第1段階を通過した銘柄がありません。")
+        return pd.DataFrame()
 
     # 2. 第2段階：株価の毎日更新＆株式数の条件付き更新
     status_counts = {"SUCCESS": 0, "NOT_FOUND": 0, "NO_PRICE": 0, "NO_SHARES": 0, "YF_ERROR": 0}
