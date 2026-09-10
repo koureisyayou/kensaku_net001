@@ -17,6 +17,12 @@ jpx_alerts.py（監理・整理銘柄）とは別ファイルにしている。
 こちらは区分ごとに独立して扱い、取れなかった区分は
 前回のキャッシュを残す。
 
+JPX は該当銘柄が0件のとき、表そのものを作らず見出しだけを置く。
+ページ構造が変わって読めない場合と症状が同じになるため、
+両者を機械的に区別できない。安全側に倒して前回のキャッシュを残すので、
+該当が外れた銘柄が残り続ける可能性がある。各行の取得日で判断すること。
+実際に問題が起きたら、判定方法を見直す。
+
 出力: jpx_risk_cache.csv
     コード / 銘柄名 / 市場区分 / 区分 / 該当事由 / 取得日
 
@@ -161,7 +167,14 @@ def fetch_page(label: str, url: str) -> pd.DataFrame:
         }))
 
     if not out:
-        logger.warning(f"[{label}] コード列を持つ表がありませんでした: {url}")
+        logger.warning(
+            f"[{label}] コード列を持つ表がありませんでした: {url}"
+        )
+        logger.warning(
+            f"  該当銘柄が0件なのか、ページ構造が変わって読めなかったのかは"
+            "ここでは区別できません。JPX は該当が無いとき表そのものを作らず、"
+            "見出しだけを置くため、症状が同じになります。"
+        )
         return pd.DataFrame()
 
     df = pd.concat(out, ignore_index=True)
@@ -211,8 +224,13 @@ def main():
     missing = [label for label, _url in SOURCES if label not in fetched]
     if missing:
         logger.warning(
-            f"取得できなかった区分: {', '.join(missing)}。"
-            "前回のキャッシュをそのまま残します（取得日で古さを確認できます）。"
+            f"表を読めなかった区分: {', '.join(missing)}。"
+            "該当0件か取得失敗かは区別できないため、安全側に倒して"
+            "前回のキャッシュをそのまま残します。"
+        )
+        logger.warning(
+            "  そのため、実際には該当が外れた銘柄が残り続ける可能性があります。"
+            "各行の取得日を見れば、いつ取れたものかが分かります。"
         )
         keep = cache[cache["区分"].isin(missing)]
         if not keep.empty:
