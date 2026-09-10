@@ -2,209 +2,162 @@ name: Net-Net Stock Screener Pipeline
 
 on:
   schedule:
-    # 平日 18:00 JST (09:00 UTC) : 差分更新
+    # 平日 18:00 JST（= 09:00 UTC）に差分更新
     - cron: '0 9 * * 1-5'
-    # 土曜 00:00 JST (金曜 15:00 UTC) : 週末フルスキャン
+    # 土曜 00:00 JST（= 金 15:00 UTC）にフルスキャン
     - cron: '0 15 * * 5'
   workflow_dispatch:
     inputs:
       full_scan:
+        description: 'EDINETの過去365日分を走査する（processed_docs.csv にある書類はスキップ）'
         type: boolean
-        description: 'フルスキャン（過去365日分の書類を検索）を実行しますか？'
         default: false
       rebuild:
+        description: '財務キャッシュを作り直す（financial_cache.csv と processed_docs.csv を削除してから全件取得。数時間かかる）'
         type: boolean
-        description: '財務キャッシュを破棄してゼロから作り直しますか？（処理済みリストも消すため数時間かかります）'
         default: false
       repair:
+        description: '値が欠けている銘柄だけ再取得する（REPAIR_COLS が対象）'
         type: boolean
-        description: 'REPAIR_COLS が欠けている銘柄だけ再取得しますか？'
         default: false
+
+# 同時実行を1本に制限する。
+# スケジュールと手動実行が重なると、同じファイルを2つのジョブが
+# 書き換えてコミットが競合する。
+concurrency:
+  group: screener-pipeline
+  cancel-in-progress: false
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
-  issues: write
-
-# 手動フルスキャンとスケジュール実行が重なるとコミットが衝突するため直列化する
-concurrency:
-  group: net-net-screener
-  cancel-in-progress: false
 
 jobs:
-  build-and-screen:
+  run:
     runs-on: ubuntu-latest
-    # フルスキャン（数千件のXBRLダウンロード）でも打ち切られないように上限を明示
+    # rebuild は数時間かかる。既定の6時間では足りない場合があるが、
+    # 途中で切れても processed_docs.csv に済んだ分が残るので、
+    # もう一度流せば続きから進む。
     timeout-minutes: 350
-    steps:
-      - name: リポジトリのチェックアウト
-        uses: actions/checkout@v4
 
-      - name: Python 3.11 のセットアップ (pipキャッシュ有効)
-        uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: 依存ライブラリのインストール
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      # rebuild 時のみ既存キャッシュを破棄する。
-      # processed_docs.csv を消さないと、--full を付けても
-      # 「既処理」として全書類がスキップされ、旧ロジックのデータが残り続ける。
-      - name: 財務キャッシュの破棄 (rebuild時のみ)
-        if: ${{ github.event.inputs.rebuild == 'true' }}
+      # リモートに追従する。
+      # 前回のコミットが残っていると push で弾かれるため、
+      # 生成物を退避してから reset し、書き戻す。
+      - name: リモート追従
         run: |
-          echo "Discarding financial_cache.csv and processed_docs.csv ..."
-          rm -f financial_cache.csv processed_docs.csv
+          set -e
+          mkdir -p /tmp/keep
+          for f in financial_cache.csv processed_docs.csv \
+                   screening_history.csv screening_history_legacy.csv \
+                   stock_cache.csv yearly_high_low.csv \
+                   jpx_alerts_cache.csv jpx_risk_cache.csv \
+                   tse_listed.csv local_price_history.csv; do
+            [ -f "$f" ] && cp "$f" /tmp/keep/ || true
+          done
+          git fetch origin main
+          git reset --hard origin/main
+          for f in /tmp/keep/*; do
+            [ -e "$f" ] && cp "$f" . || true
+          done
+          echo "--- 追従後の生成物 ---"
+          wc -l financial_cache.csv processed_docs.csv screening_history.csv 2>/dev/null || true
 
-      - name: 財務キャッシュの更新 (日次 / フルスキャン / 欠損修復)
+      - name: 財務キャッシュの削除（rebuild のみ）
+        if: inputs.rebuild
+        run: |
+          rm -f financial_cache.csv processed_docs.csv
+          echo "financial_cache.csv と processed_docs.csv を削除しました。全件取得します。"
+
+      - name: 財務データ更新
         env:
           EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
         run: |
-          if [ "${{ github.event.inputs.repair }}" = "true" ]; then
-            echo "Running REPAIR mode..."
-            python update_financials.py --repair
-          elif [ "${{ github.event.inputs.full_scan }}" = "true" ] \
-            || [ "${{ github.event.inputs.rebuild }}" = "true" ] \
-            || [ "${{ github.event.schedule }}" = "0 15 * * 5" ]; then
-            echo "Running FULL SCAN mode..."
-            python update_financials.py --full
-          else
-            echo "Running DAILY DIFFERENTIAL mode..."
-            python update_financials.py
+          ARGS=""
+          if [ "${{ inputs.full_scan }}" = "true" ] || [ "${{ inputs.rebuild }}" = "true" ]; then
+            ARGS="$ARGS --full"
           fi
+          if [ "${{ inputs.repair }}" = "true" ]; then
+            ARGS="$ARGS --repair"
+          fi
+          # 土曜の定期実行はフルスキャン
+          if [ "${{ github.event.schedule }}" = "0 15 * * 5" ]; then
+            ARGS="$ARGS --full"
+          fi
+          echo "python update_financials.py $ARGS"
+          python update_financials.py $ARGS
+
+      - name: JPX指定銘柄の取得
+        continue-on-error: true
+        run: python jpx_alerts.py
+
+      - name: JPX上場リスク情報の取得
+        continue-on-error: true
+        run: python jpx_risk.py
+
+      # 東証の上場銘柄一覧。月次で足りるので月初にだけ取る。
+      # 無い場合も取得する（初回とキャッシュ紛失時のため）。
+      - name: 東証上場銘柄一覧の取得
+        continue-on-error: true
+        run: |
+          DAY=$(date -u +%d)
+          if [ ! -f tse_listed.csv ] || [ "$DAY" -ge 05 -a "$DAY" -le 12 ]; then
+            python fetch_jpx_listed.py
+          else
+            echo "tse_listed.csv は既にあります（月初のみ更新）。"
+          fi
+
+      - name: 年別高値・安値の更新
+        continue-on-error: true
+        run: python yearly_high_low.py
 
       - name: スクリーニング実行
         run: python run_screener.py
 
-      # ------------------------------------------------------------------
-      # リモートへの追従。
-      #
-      # ここまでで生成したファイルは毎回ゼロから作り直されるものなので、
-      # リモートとの差分をマージする意味がない。マージを試みると rebase が
-      # 衝突して pipeline 全体が止まるため、リモートの最新に合わせたうえで
-      # 今回の生成物を上書きする方式にしている。
-      #
-      # 累積ファイル（screening_history.csv / local_price_history.csv /
-      # yearly_high_low.csv）は退避対象から外してリモート側を採用する。
-      # これらへ追記する処理は、このステップより後に置くこと。
-      # 前で実行すると reset で消える。
-      # ------------------------------------------------------------------
-      - name: リモートの最新状態に追従（生成物は今回の結果を採用）
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 中断中の rebase / merge が残っていれば片付ける
-          git rebase --abort 2>/dev/null || true
-          git merge --abort 2>/dev/null || true
-
-          # 毎回作り直される生成物のみ退避（累積ファイルは含めない）
-          mkdir -p /tmp/artifacts
-          for f in financial_cache.csv processed_docs.csv stock_cache.csv \
-                   net_net_candidates.csv invalid_financials.csv; do
-            if [ -f "$f" ]; then cp "$f" /tmp/artifacts/; fi
-          done
-
-          git fetch origin main
-          git reset --hard origin/main
-          cp -f /tmp/artifacts/* . 2>/dev/null || true
-
-          echo "--- 追従後の累積ファイル ---"
-          wc -l screening_history.csv 2>/dev/null || echo "screening_history.csv なし"
-          wc -l local_price_history.csv 2>/dev/null || echo "local_price_history.csv なし"
-          wc -l yearly_high_low.csv 2>/dev/null || echo "yearly_high_low.csv なし"
-
-      # 履歴の追記はリモート最新を取り込んだ後に行う。
-      # 同日同銘柄は save_history.py 側で重複排除される。
-      - name: 履歴データの追記保存
+      - name: 履歴の保存
         run: python save_history.py
 
-      # 年別の高値・安値を蓄積する。過去の年は確定値なので取り直さない。
-      # 未取得の銘柄だけ10年分を取り、取得済みは当年の行だけ更新する。
-      # これも累積ファイルなので、必ずリモート追従より後に実行する。
-      - name: 年別高安の蓄積
-        continue-on-error: true
-        run: python yearly_high_low.py
-
-      # 名証の相場表PDFを取得し local_price_history.csv に追記する。
-      # これも累積ファイルなので、必ずリモート追従より後に実行する。
-      # 地方版は本体のおまけなので、失敗しても pipeline は止めない。
-      - name: 名証の株価取得
-        id: local_prices
+      - name: 名証の相場データ取得
         continue-on-error: true
         run: python fetch_local_prices.py
 
-      # PDFは固定URLで毎日上書きされるため、取得できた原本を必ず残す。
-      # パースに失敗したときこそ必要なので if: always() にしている。
-      # リポジトリにコミットするとPages成果物とgit履歴が永久に肥大化するので
-      # アーティファクト（90日保持）に逃がす。
-      - name: 名証PDF原本の保存 (Artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nse-raw-pdf-${{ github.run_id }}
-          path: raw_pdf/
-          retention-days: 90
-          if-no-files-found: ignore
-
-      # continue-on-error だと失敗しても全体が緑になり、蓄積が止まったことに
-      # 気づけない。outcome を拾って通知だけ出す。
-      - name: 地方版の失敗を通知
-        if: steps.local_prices.outcome == 'failure'
-        uses: dacbd/create-issue-action@v2
-        with:
-          token: ${{ github.token }}
-          title: "⚠️ [Local] 名証の株価取得に失敗しました"
-          body: |
-            local_price_history.csv への追記が行われていません。
-            蓄積期間中の欠損は後から埋められないため、早めに確認してください。
-            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-      # 東証上場銘柄一覧（data_j.xls）は月次更新なので毎日は取りに行かない。
-      # ファイルが無いとき、または月の上旬（JPXの差替は第3営業日）だけ実行する。
-      - name: 東証上場銘柄一覧の更新 (月初のみ)
-        continue-on-error: true
-        run: |
-          DAY=$(TZ=Asia/Tokyo date +%d)
-          if [ ! -f tse_listed.csv ] || { [ "$DAY" -ge 5 ] && [ "$DAY" -le 12 ]; }; then
-            python fetch_jpx_listed.py
-          else
-            echo "skip (day=$DAY, tse_listed.csv は既にあります)"
-          fi
-
-      # 地方単独上場のネットネット候補。株数が揃うまでは0件で終わるが、
-      # ログに出る「地方単独 N件 / 約定あり M件」が母集団の見積もりになる。
       - name: 地方版スクリーニング
         continue-on-error: true
         run: python run_screener_local.py
 
-      - name: HTMLページ生成
-        run: python generate_html.py
+      - name: HTML生成
+        run: |
+          python generate_html.py
+          python generate_shortlist.py
+          python generate_local_html.py
 
-      - name: 地方版ページ生成
-        continue-on-error: true
-        run: python generate_local_html.py
-
-      # 二次スクリーニング。JPXの取得失敗などで落ちても一次候補の公開は続けたいので
-      # continue-on-error を付ける（失敗時は前回の shortlist.html が残る）。
-      - name: 二次スクリーニングページ生成
-        continue-on-error: true
-        run: python generate_shortlist.py
-
-      - name: コンテキスト生成
-        if: always()
+      - name: CONTEXT.md の生成
         run: python make_context.py
 
-      - name: キャッシュ(CSV)、履歴データおよびHTMLをコミット・プッシュ
+      - name: コミット
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chrono: auto-update financial cache, screening history and pages [skip ci]"
-          file_pattern: 'financial_cache.csv processed_docs.csv stock_cache.csv net_net_candidates.csv screening_history.csv invalid_financials.csv jpx_alerts_cache.csv local_price_history.csv local_prices.csv tse_listed.csv net_net_candidates_local.csv yearly_high_low.csv CONTEXT.md index.html shortlist.html local.html'
+          commit_message: 'chrono: auto-update financial cache, screening history and pages [skip ci]'
+          file_pattern: >-
+            financial_cache.csv processed_docs.csv
+            screening_history.csv invalid_financials.csv
+            net_net_candidates.csv stock_cache.csv
+            jpx_alerts_cache.csv jpx_risk_cache.csv
+            tse_listed.csv yearly_high_low.csv
+            local_prices.csv local_price_history.csv
+            net_net_candidates_local.csv
+            index.html shortlist.html local.html
+            CONTEXT.md
 
-      - name: ログファイルの保存 (Artifact)
+      - name: ログの保存
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -213,37 +166,6 @@ jobs:
             screener.log
             update_financials.log
             yearly_high_low.log
+            jpx_risk.log
             invalid_financials.csv
-          if-no-files-found: ignore
-
-      - name: GitHub Pages 向けビルド成果物の準備
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: '.'
-
-  deploy-pages:
-    needs: build-and-screen
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: GitHub Pages へ正式デプロイ
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-  notify-on-failure:
-    needs: [build-and-screen, deploy-pages]
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - name: 失敗時にGitHub Issueを自動作成して通知
-        uses: dacbd/create-issue-action@v2
-        with:
-          token: ${{ github.token }}
-          title: "🚨 [Screener Failure] スクリーニングパイプラインが失敗しました"
-          body: |
-            ワークフローの実行でエラーが発生しました。ログを確認してください。
-            - **実行イベント**: ${{ github.event_name }}
-            - **実行詳細**: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          assignees: ${{ github.actor }}
+          retention-days: 7
