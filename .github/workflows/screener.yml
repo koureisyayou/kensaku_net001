@@ -150,7 +150,7 @@ jobs:
             financial_cache.csv processed_docs.csv
             screening_history.csv invalid_financials.csv
             net_net_candidates.csv stock_cache.csv
-            jpx_alerts_cache.csv
+            jpx_alerts_cache.csv jpx_risk_cache.csv
             tse_listed.csv yearly_high_low.csv
             local_prices.csv local_price_history.csv
             net_net_candidates_local.csv
