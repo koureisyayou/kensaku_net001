@@ -136,3 +136,114 @@ def fetch_page(label: str, url: str) -> pd.DataFrame:
 
         reason = pd.Series("", index=t.index)
         for rc in REASON_COLS:
+            col = pick_col(t.columns, rc)
+            if col is not None:
+                val = t[col]
+                if isinstance(val, pd.DataFrame):
+                    val = val.iloc[:, 0]
+                reason = val.astype(str).str.strip().replace("nan", "")
+                break
+
+        def col_or_blank(col):
+            if col is None:
+                return ""
+            v = t[col]
+            if isinstance(v, pd.DataFrame):
+                v = v.iloc[:, 0]
+            return v.astype(str).str.strip().replace("nan", "")
+
+        out.append(pd.DataFrame({
+            "コード": t["_code"],
+            "銘柄名": col_or_blank(name_col),
+            "市場区分": col_or_blank(market_col),
+            "区分": label,
+            "該当事由": reason,
+        }))
+
+    if not out:
+        logger.warning(f"[{label}] コード列を持つ表がありませんでした: {url}")
+        return pd.DataFrame()
+
+    df = pd.concat(out, ignore_index=True)
+    df = df.drop_duplicates(subset=["コード", "区分"], keep="first")
+    logger.info(f"[{label}] {len(df)} 件")
+    return df
+
+
+def load_cache() -> pd.DataFrame:
+    """既存キャッシュを読む。無ければ空を返す。"""
+    try:
+        df = pd.read_csv(CACHE_FILE, dtype=str)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=COLUMNS)
+    except Exception as e:
+        logger.warning(f"{CACHE_FILE} を読めませんでした（新規作成します）: {e}")
+        return pd.DataFrame(columns=COLUMNS)
+
+    for c in COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    return df[COLUMNS]
+
+
+def main():
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    cache = load_cache()
+
+    fetched = {}
+    for label, url in SOURCES:
+        df = fetch_page(label, url)
+        if not df.empty:
+            df["取得日"] = today
+            fetched[label] = df
+
+    if not fetched:
+        logger.error(
+            "すべての区分で取得に失敗しました。"
+            f"{CACHE_FILE} は更新しません（前回の内容が残ります）。"
+        )
+        sys.exit(1)
+
+    # 取れなかった区分は前回の行を残す。
+    # 消してしまうと build_filters.py 側からは「該当0件」に見えて、
+    # 「取得できなかった」と区別が付かなくなる。
+    parts = list(fetched.values())
+    missing = [label for label, _url in SOURCES if label not in fetched]
+    if missing:
+        logger.warning(
+            f"取得できなかった区分: {', '.join(missing)}。"
+            "前回のキャッシュをそのまま残します（取得日で古さを確認できます）。"
+        )
+        keep = cache[cache["区分"].isin(missing)]
+        if not keep.empty:
+            parts.append(keep)
+            for label in missing:
+                n = int((keep["区分"] == label).sum())
+                if n:
+                    old = keep.loc[keep["区分"] == label, "取得日"].max()
+                    logger.warning(f"  [{label}] 前回の {n} 件を保持（取得日 {old}）")
+
+    merged = pd.concat(parts, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["コード", "区分"], keep="first")
+    merged = merged.sort_values(["区分", "コード"]).reset_index(drop=True)
+    merged[COLUMNS].to_csv(CACHE_FILE, index=False, encoding="utf-8-sig")
+
+    logger.info(f"{CACHE_FILE} を更新しました: {len(merged)} 件")
+    for label, _url in SOURCES:
+        n = int((merged["区分"] == label).sum())
+        mark = "" if label in fetched else "（前回のまま）"
+        logger.info(f"  {label}: {n} 件{mark}")
+
+    # 同じ銘柄が複数の区分に該当することがある
+    dup = merged["コード"].value_counts()
+    dup = dup[dup > 1]
+    if len(dup):
+        logger.info(f"  複数の区分に該当: {len(dup)} 銘柄")
+        for code, _n in dup.items():
+            labels = sorted(merged.loc[merged["コード"] == code, "区分"])
+            name = merged.loc[merged["コード"] == code, "銘柄名"].iloc[0]
+            logger.info(f"    {code} {name}: {' / '.join(labels)}")
+
+
+if __name__ == "__main__":
+    main()
