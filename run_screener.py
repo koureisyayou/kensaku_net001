@@ -185,7 +185,22 @@ def fetch_shares_count(ticker):
     return shares
 
 
-def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):
+# yfinance が異常な株価を返すことがある。
+# 2026-09-14 の実行で 1909（日本ドライケミカル）が
+# 株価 16,278,046,720 円 / 時価総額 436兆億円 として記録された。
+# 同銘柄は JPX の整理銘柄（2026-08-24 指定）で、上場廃止が近い。
+#
+# 下の price <= 0 は 0 と負の値しか弾かないので、この値は
+# SUCCESS として stock_cache.csv に保存される。ただし NCAV倍率が
+# 極端に小さくなるため第2段階（NCAV/時価総額 >= 1.0）は通らず、
+# 候補には入らない。そのため実害は stock_cache.csv の1行だけ。
+#
+# 上限を入れるならここ。ただし「いくらを超えたら異常か」の根拠を
+# 持たないため、保留にしている。実データで再発したら、
+# その値を見て判断する。
+
+
+def fetch_single_ticker(ticker_symbol, existing_shares, is_shares_expired):   
     """
     単一Tickerから最新株価を取得。
     株式数が未取得または有効期限切れの場合のみ株式数を重いAPIで再取得する。
