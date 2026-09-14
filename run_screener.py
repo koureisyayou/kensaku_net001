@@ -431,9 +431,21 @@ def run_pipeline(financial_df):
         # 価格指標（安値乖離・騰落率・停滞日数・売買代金）を列として付与する。
         # 最終候補に対してのみ日足を取得するので、ここが正しい呼び出し位置。
         # 失敗してもスクリーニング自体は成立させたいので握りつぶす。
+        #
+        # add_price_metrics は (DataFrame, 取得できなかったティッカー) を返す。
+        # 件数をここで出すのは、全銘柄が取れなくても「付与しました」とだけ
+        # 出ていた以前の状態では、ログを見ても異常に気づけなかったため。
+        # 割合が高いときは price_metrics 側が error レベルで記録する。
+        #
+        # 件数は CSV には出さない。net_my_filters の build_filters.py は
+        # 「調整後終値」列の欠損を数えれば同じことが分かるので、
+        # リポジトリ間の受け渡しを増やさない。
         try:
-            summary_df = add_price_metrics(summary_df, ticker_col="ticker")
-            logger.info("価格指標の列を付与しました。")
+            summary_df, skipped_tickers = add_price_metrics(summary_df, ticker_col="ticker")
+            logger.info(
+                f"価格指標の列を付与しました。"
+                f"（価格を取得できなかった銘柄: {len(skipped_tickers)} / {len(summary_df)} 件）"
+            )
         except Exception as e:
             logger.warning(f"価格指標の付与に失敗しました（列なしで続行します）: {e}")
 
