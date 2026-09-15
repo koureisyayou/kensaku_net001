@@ -194,11 +194,25 @@ def summary_stats() -> list[str]:
                 f"- 名証: 掲載{len(df):,}件 / 期間内に約定{traded:,}件 "
                 f"（相場日 {as_of} / 蓄積 {win}営業日）"
             )
+            # 東証重複の判別について。
+            #
+            # local_prices.csv（fetch_local_prices.py の出力）には
+            # is_local_only 列が無い。判別は run_screener_local.py が
+            # annotate_tse() で実行時に付与しており、結果は
+            # net_net_candidates_local.csv の is_local_only 列に残る。
+            #
+            # 以前はここで「未適用（is_local_only 列なし）」と出していたが、
+            # 判別は機能しているので誤解を招いた。列がある場合の分岐は
+            # 残してあるので、将来 fetch_local_prices.py 側で付与するように
+            # 変えたときは、そのまま件数が出る。
             if "is_local_only" in df.columns:
                 local_only = (df["is_local_only"].astype(str).str.lower() == "true").sum()
                 lines.append(f"- うち地方単独の候補: {local_only:,}件")
             else:
-                lines.append("- 東証重複の判別: 未適用（is_local_only 列なし）")
+                lines.append(
+                    "- 東証重複の判別: run_screener_local.py 側で実施"
+                    "（結果は net_net_candidates_local.csv の is_local_only 列）"
+                )
         except Exception:  # noqa: BLE001
             pass
 
