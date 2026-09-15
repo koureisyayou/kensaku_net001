@@ -1,0 +1,142 @@
+name: Rebuild Financial Cache
+
+# 財務キャッシュ（financial_cache.csv）を取り直すためのワークフロー。
+# スクリーニングもHTML生成も行わず、update_financials.py だけを実行して
+# financial_cache.csv と processed_docs.csv をコミットする。
+# 更新されたキャッシュは、次の screener.yml の定期実行（平日18:00 JST）が使う。
+#
+# ------------------------------------------------------------------
+# screener.yml の rebuild との使い分け
+#
+# screener.yml の rebuild:
+#     2ファイルを消して全件取得し、スクリーニングとページ生成まで
+#     一度に走らせる。350分以内に終わる見込みがあるときはこちら。
+#     ただし途中でタイムアウトすると、コミットステップに到達しないため
+#     取得済みの分がすべて失われる（リポジトリのキャッシュは元のまま）。
+#
+# このワークフロー:
+#     limit で件数を区切り、複数回に分けて取り直す。
+#     1回の実行が短く終わるので、タイムアウトで成果を失わない。
+#     全件が何時間かかるか分からないとき、また前回タイムアウトしたときに使う。
+#
+# ------------------------------------------------------------------
+# 使い方（分割して取り直す場合）
+#
+#   1回目: clear=true, limit=500
+#          → 2ファイルを削除し、先頭500件を取得してコミット
+#   2回目以降: clear=false, limit=500
+#          → processed_docs.csv に無い書類を500件ずつ取得
+#   最後:   ログの「処理対象企業数」と「既処理スキップ」が一致すれば完了
+#
+# clear=true を2回目以降に選ぶと最初からやり直しになるので注意。
+#
+# limit の値は、1回の実行が timeout-minutes に収まる範囲で決める。
+# 1件あたりの実時間が分からないうちは小さめ（500件程度）で試し、
+# 実際の所要時間を見てから増やす。
+#
+# ------------------------------------------------------------------
+# どういうときに使うか
+#
+#   ・抽出ロジックを直したあと、既存の行に古い結果が残っているとき
+#     （--repair は値が欠けている行しか対象にしないので、値が入っている
+#       行の内容が誤っている場合は取り直すしかない）
+#   ・consolidated・accounting_standard など、判定で決まる列の
+#     内訳がおかしいと分かったとき
+#   ・screener.yml の rebuild がタイムアウトしたあと
+#
+# 列を新設しただけで値が空欄になっている場合は、--repair の方が速い。
+# REPAIR_COLS に列名を足して screener.yml の repair を実行する。
+# ------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      clear:
+        description: '最初からやり直す（financial_cache.csv と processed_docs.csv を削除。2回目以降は false）'
+        type: boolean
+        default: false
+      limit:
+        description: 'この回で取得する件数の上限（0 は無制限）'
+        default: '500'
+
+# screener.yml と同じグループにする。
+# 同じファイルを書き換えるので、定期実行と重なるとコミットが競合する。
+concurrency:
+  group: screener-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    # limit で区切る前提なので、screener.yml より短くしてある。
+    # ここに収まらない limit を指定すると、その回の成果は失われる。
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: pip install -r requirements.txt
+
+      # リモートに追従する。screener.yml の同名ステップと同じ方式。
+      # 退避するのはこのワークフローが触る2ファイルだけにする。
+      # 他の生成物はここでは書き換えないので、reset 後のものをそのまま使う。
+      - name: リモート追従
+        run: |
+          set -e
+          mkdir -p /tmp/keep
+          for f in financial_cache.csv processed_docs.csv; do
+            [ -f "$f" ] && cp "$f" /tmp/keep/ || true
+          done
+          git fetch origin main
+          git reset --hard origin/main
+          for f in /tmp/keep/*; do
+            [ -e "$f" ] && cp "$f" . || true
+          done
+          echo "--- 追従後の生成物 ---"
+          wc -l financial_cache.csv processed_docs.csv 2>/dev/null || true
+
+      # clear=true のときだけ消す。
+      # update_financials.py は processed_docs.csv だけでなく
+      # financial_cache.csv の doc_id 列からもスキップ対象を集めるため、
+      # 片方だけ消しても全件取得にはならない。
+      - name: キャッシュの削除（clear のみ）
+        if: inputs.clear
+        run: |
+          rm -f financial_cache.csv processed_docs.csv
+          echo "financial_cache.csv と processed_docs.csv を削除しました。最初から取得します。"
+
+      - name: 財務データ更新
+        env:
+          EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+          IN_LIMIT: ${{ inputs.limit }}
+        run: |
+          ARGS="--full"
+          if [ -n "$IN_LIMIT" ] && [ "$IN_LIMIT" != "0" ]; then
+            ARGS="$ARGS --limit $IN_LIMIT"
+          fi
+          echo "python update_financials.py $ARGS"
+          python update_financials.py $ARGS
+
+      # スクリーニングもページ生成も行わない。
+      # キャッシュだけ更新し、その利用は次の screener.yml の実行に任せる。
+      - name: コミット
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: rebuild financial cache [skip ci]'
+          file_pattern: 'financial_cache.csv processed_docs.csv'
+
+      - name: ログの保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebuild-log-${{ github.run_id }}
+          path: update_financials.log
+          retention-days: 7
