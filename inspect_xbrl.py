@@ -12,6 +12,16 @@
     1) 名前空間ごとの要素数（jppfs_cor=日本基準 / jpigp_cor=IFRS のどちらが入っているか）
     2) 資産・負債・純資産・現金系のタグを、名前空間・値・コンテキスト付きで全部列挙
     3) いま update_financials.py が採用するはずの値（同じロジックを再現）
+    4) 判定
+    5) 継続企業の前提（GC）に関係する要素の一覧
+
+5) を別の節にしている理由:
+    2) は amount() で数値に変換できない要素を捨てている。GC注記は
+    文章（テキストブロック）で開示されるため、INTERESTING_PREFIXES に
+    足すだけでは表示されない。2) の挙動を変えると既存の診断結果が
+    変わるので、GC だけを別に走査する。
+    要素名は未確認のため、完全一致ではなく「GoingConcern を含む」で拾う。
+    コンテキストでも絞らない（どのコンテキストに付くかも未確認のため）。
 """
 
 import os
@@ -53,6 +63,13 @@ INTERESTING_PREFIXES = (
     "CurrentAssets", "CurrentLiabilities",
     "Cash",
 )
+
+# 継続企業の前提に関係する要素を拾うためのキーワード（部分一致）。
+# 5) の節だけで使う。
+GC_KEYWORD = "GoingConcern"
+
+# 5) で表示する本文の先頭文字数。全文を出すとログが読めなくなる。
+GC_PREVIEW_CHARS = 120
 
 
 def headers():
@@ -159,6 +176,33 @@ def amount(el):
         except ValueError:
             pass
     return v
+
+
+def inspect_going_concern(soup):
+    """継続企業の前提に関係する要素を、数値・文字列を問わず全部出す。
+
+    要素名に GC_KEYWORD を含むものを拾う。コンテキストでは絞らない。
+    文字列の場合は HTML タグを除いた本文の文字数と先頭部分を出す。
+    ここでの結果を見て、enrich_pl.py での取得方法（要素の有無で判定するか、
+    本文まで持つか）を決める。
+    """
+    print(f"\n--- 継続企業の前提（要素名に {GC_KEYWORD} を含むもの） ---")
+    hits = [el for el in soup.find_all(True) if GC_KEYWORD in (el.name or "")]
+    if not hits:
+        print("  該当なし（この書類に該当する要素は存在しない）")
+        return
+
+    print(f"  {len(hits)} 件")
+    for el in hits:
+        ctx = el.get("contextRef") or el.get("contextref") or "(contextRefなし)"
+        raw = (el.text or "").strip()
+        # テキストブロックは中身がエスケープされたHTML。タグを除いて本文だけにする。
+        body = BeautifulSoup(raw, "html.parser").get_text(" ", strip=True) if raw else ""
+        preview = body[:GC_PREVIEW_CHARS].replace("\n", " ")
+        print(f"  {el.prefix or '':<12} {el.name}")
+        print(f"      コンテキスト: {ctx}")
+        print(f"      本文の文字数: {len(body)}")
+        print(f"      先頭: {preview if preview else '(空)'}")
 
 
 def inspect(sec_code, days):
@@ -290,6 +334,9 @@ def inspect(sec_code, days):
     eq = picked.get("純資産(total)", (None, None))[1]
     if ta and eq and eq > ta:
         print(f"  ⚠ 純資産({fmt(eq)}) > 総資産({fmt(ta)}) — この書類は破棄されます")
+
+    # --- 5) 継続企業の前提 ---------------------------------------------
+    inspect_going_concern(soup)
 
     soup.decompose()
     print()
