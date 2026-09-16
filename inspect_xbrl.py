@@ -7,6 +7,7 @@
     python inspect_xbrl.py 7203
     python inspect_xbrl.py 7203 8001 6758      # 複数まとめて
     python inspect_xbrl.py 7203 --days 400     # 検索する日数を変える
+    python inspect_xbrl.py 3133 --doc-type 160 # 半期報告書だけを探す（最新の有報を飛ばす）
 
 出力されるもの:
     1) 名前空間ごとの要素数（jppfs_cor=日本基準 / jpigp_cor=IFRS のどちらが入っているか）
@@ -102,9 +103,17 @@ def get(url, params=None, retries=3):
     return None
 
 
-def find_latest_doc(sec_code, days):
-    """指定コードの最新の有報等を探して doc_id を返す。"""
-    target_types = {"120", "140", "160"}  # 有報・四半期・半期（訂正は除く）
+# 探す書類の種類の既定値。有報・四半期・半期（訂正は除く）。
+DEFAULT_DOC_TYPES = ("120", "140", "160")
+
+
+def find_latest_doc(sec_code, days, doc_types=DEFAULT_DOC_TYPES):
+    """指定コードの最新の有報等を探して doc_id を返す。
+
+    doc_types を絞ると、その種類の中で最新のものを返す。
+    たとえば ("160",) なら、最新が有報でも、それより前の半期報告書を開ける。
+    """
+    target_types = set(doc_types)
     today = datetime.now(JST)
     found = []
 
@@ -136,7 +145,8 @@ def find_latest_doc(sec_code, days):
         time.sleep(0.05)
 
     if not found:
-        print(f"[{sec_code}] 書類が見つかりませんでした。--days を増やしてください。")
+        print(f"[{sec_code}] 書類が見つかりませんでした（種別={sorted(target_types)}）。"
+              "--days を増やしてください。")
         return None
 
     found.sort(key=lambda x: x["submit"], reverse=True)
@@ -264,9 +274,9 @@ def inspect_going_concern_text(soup):
         print("  該当なし")
 
 
-def inspect(sec_code, days):
+def inspect(sec_code, days, doc_types=DEFAULT_DOC_TYPES):
     print("=" * 78)
-    doc_id = find_latest_doc(sec_code, days)
+    doc_id = find_latest_doc(sec_code, days, doc_types)
     if not doc_id:
         return
 
@@ -408,6 +418,9 @@ def main():
     ap = argparse.ArgumentParser(description="EDINET XBRL の中身を覗く診断ツール")
     ap.add_argument("sec_codes", nargs="+", help="証券コード（4桁）")
     ap.add_argument("--days", type=int, default=400, help="書類一覧をさかのぼる日数")
+    ap.add_argument("--doc-type", nargs="+", default=list(DEFAULT_DOC_TYPES),
+                    choices=list(DEFAULT_DOC_TYPES),
+                    help="探す書類の種類（120=有報 / 140=四半期 / 160=半期）。既定は3種すべて")
     args = ap.parse_args()
 
     if not EDINET_API_KEY:
@@ -415,7 +428,7 @@ def main():
         sys.exit(1)
 
     for code in args.sec_codes:
-        inspect(code, args.days)
+        inspect(code, args.days, tuple(args.doc_type))
 
 
 if __name__ == "__main__":
