@@ -527,11 +527,27 @@ def fetch_xbrl_data(doc_id, sec_code):
                         f"(ctx={ca_ctx})"
                     )
 
-                soup.decompose()
+               soup.decompose()
 
-                if None in (ca_val, tl_val, ta_val, eq_val):
+                # 4項目のどれかが取れなかった書類は使えない。
+                # 以前はここで黙って捨てていたため、フルスキャンの
+                # 「解析失敗」件数だけが増えて理由が分からなかった。
+                # どの項目が欠けたかを残すと、タグの追加が要るのか
+                # コンテキストの選択が外れたのかを後から判別できる。
+                missing = [
+                    label for label, val in (
+                        ("流動資産", ca_val), ("総負債", tl_val),
+                        ("総資産", ta_val), ("純資産", eq_val),
+                    ) if val is None
+                ]
+                if missing:
+                    logger.warning(
+                        f"[{sec_code}] 取得できない項目があるため破棄: {', '.join(missing)} "
+                        f"(doc_id={doc_id}, ctx={ca_ctx or ta_ctx or '-'})"
+                    )
                     return None
                 if ta_val <= 0:
+                    logger.warning(f"[{sec_code}] 総資産が0以下のため破棄 (ta={ta_val}, doc_id={doc_id})")
                     return None
 
                # 整合性チェック：科目の取り違えを検知して捨てる
