@@ -534,7 +534,15 @@ def fetch_xbrl_data(doc_id, sec_code):
                 if ta_val <= 0:
                     return None
 
-                # 整合性チェック：科目の取り違えを検知して捨てる
+               # 整合性チェック：科目の取り違えを検知して捨てる
+                #
+                # ただし「負債 > 総資産」は債務超過の会社でも成立するので、
+                # 取り違えとは限らない。実データでは 2338（クオンタム
+                # ソリューションズ）が該当し、総資産27.04億・総負債30.47億・
+                # 純資産-3.43億で破棄される。両者は純資産の符号で見分けられる
+                # ので、ログだけ書き分ける（どちらも破棄する点は同じ）。
+                # 債務超過の会社は NCAV も自己資本比率もマイナスになり、
+                # run_screener.py の第1段階を通らないため、捨てても候補は変わらない。
 
                 # 4項目が同じ会計体系から取れているかを確認する。
                 # 連結(IFRS)と個別(日本基準)が混ざると、分子と分母が別物になり
@@ -584,7 +592,16 @@ def fetch_xbrl_data(doc_id, sec_code):
                     logger.warning(f"[{sec_code}] 流動資産 > 総資産 のため破棄 (ca={ca_val}, ta={ta_val})")
                     return None
                 if tl_val > ta_val * 1.05:
-                    logger.warning(f"[{sec_code}] 負債 > 総資産 のため破棄 (tl={tl_val}, ta={ta_val})")
+                    if eq_val < 0:
+                        logger.warning(
+                            f"[{sec_code}] 債務超過とみられるため破棄 "
+                            f"(tl={tl_val}, ta={ta_val}, eq={eq_val})"
+                        )
+                    else:
+                        logger.warning(
+                            f"[{sec_code}] 負債 > 総資産 のため破棄 "
+                            f"(tl={tl_val}, ta={ta_val}, eq={eq_val})"
+                        )
                     return None
                 if eq_val > ta_val * 1.05:
                     logger.warning(f"[{sec_code}] 純資産 > 総資産 のため破棄 (eq={eq_val}, ta={ta_val})")
