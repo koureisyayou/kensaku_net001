@@ -527,7 +527,7 @@ def fetch_xbrl_data(doc_id, sec_code):
                         f"(ctx={ca_ctx})"
                     )
 
-               soup.decompose()
+                soup.decompose()
 
                 # 4項目のどれかが取れなかった書類は使えない。
                 # 以前はここで黙って捨てていたため、フルスキャンの
