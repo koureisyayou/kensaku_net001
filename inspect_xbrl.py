@@ -14,6 +14,7 @@
     3) いま update_financials.py が採用するはずの値（同じロジックを再現）
     4) 判定
     5) 継続企業の前提（GC）に関係する要素の一覧
+    6) 本文に「継続企業の前提」を含む文章要素の一覧（重要事象等の確認用）
 
 5) を別の節にしている理由:
     2) は amount() で数値に変換できない要素を捨てている。GC注記は
@@ -22,6 +23,12 @@
     変わるので、GC だけを別に走査する。
     要素名は未確認のため、完全一致ではなく「GoingConcern を含む」で拾う。
     コンテキストでも絞らない（どのコンテキストに付くかも未確認のため）。
+
+6) を足した理由:
+    「重要事象等」（注記には至らないが継続企業の前提に重要な疑義がある状態）は、
+    有価証券報告書では「事業等のリスク」などの文章の中に書かれる。
+    専用の要素があるかどうかは未確認のため、要素名ではなく本文で探す。
+    ここで専用の要素が見つからなければ、取得には本文の検索が必要になる。
 """
 
 import os
@@ -70,6 +77,12 @@ GC_KEYWORD = "GoingConcern"
 
 # 5) で表示する本文の先頭文字数。全文を出すとログが読めなくなる。
 GC_PREVIEW_CHARS = 120
+
+# 6) で本文から探す語。
+GC_PHRASE = "継続企業の前提"
+
+# 6) で、見つかった位置の前後に表示する文字数。
+GC_CONTEXT_CHARS = 60
 
 
 def headers():
@@ -205,6 +218,52 @@ def inspect_going_concern(soup):
         print(f"      先頭: {preview if preview else '(空)'}")
 
 
+def inspect_going_concern_text(soup):
+    """本文に GC_PHRASE を含む文章要素（TextBlock）を全部出す。
+
+    要素名に GoingConcern を含むもの（5 で出したもの）も、区別できるよう
+    印を付けて出す。本文は出現箇所の前後だけを表示する。
+    「重要事象等は存在しません」と書く会社もあるので、
+    該当するかどうかは表示された文を読んで判断する（ここでは判定しない）。
+    """
+    print(f"\n--- 本文に「{GC_PHRASE}」を含む文章要素 ---")
+    hits = 0
+    for el in soup.find_all(True):
+        name = el.name or ""
+        if not name.endswith("TextBlock"):
+            continue
+        raw = (el.text or "").strip()
+        if not raw or GC_PHRASE not in raw:
+            continue
+        body = BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
+        positions = []
+        start = 0
+        while True:
+            i = body.find(GC_PHRASE, start)
+            if i < 0:
+                break
+            positions.append(i)
+            start = i + len(GC_PHRASE)
+        if not positions:
+            continue
+
+        hits += 1
+        ctx = el.get("contextRef") or el.get("contextref") or "(contextRefなし)"
+        mark = "  ※5で表示済み" if GC_KEYWORD in name else ""
+        print(f"  {el.prefix or '':<12} {name}{mark}")
+        print(f"      コンテキスト: {ctx}")
+        print(f"      出現回数: {len(positions)}")
+        for i in positions[:3]:
+            a = max(0, i - GC_CONTEXT_CHARS)
+            b = min(len(body), i + len(GC_PHRASE) + GC_CONTEXT_CHARS)
+            print(f"      …{body[a:b]}…")
+        if len(positions) > 3:
+            print(f"      （残り {len(positions) - 3} 箇所は省略）")
+
+    if hits == 0:
+        print("  該当なし")
+
+
 def inspect(sec_code, days):
     print("=" * 78)
     doc_id = find_latest_doc(sec_code, days)
@@ -337,6 +396,9 @@ def inspect(sec_code, days):
 
     # --- 5) 継続企業の前提 ---------------------------------------------
     inspect_going_concern(soup)
+
+    # --- 6) 本文に「継続企業の前提」を含む文章要素 ----------------------
+    inspect_going_concern_text(soup)
 
     soup.decompose()
     print()
